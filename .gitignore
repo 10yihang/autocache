@@ -30,6 +30,9 @@ Thumbs.db
 # Sisyphus agent working files
 .sisyphus/
 
+# Development plans (local only)
+plan/
+
 # Docker images tar
 *.tar
 

@@ -1,0 +1,77 @@
+# Operator configuration
+operator:
+  replicaCount: 1
+  image:
+    repository: autocache-operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  
+  # Log level
+  logLevel: info
+
+# RBAC configuration
+rbac:
+  create: true
+
+# ServiceAccount configuration
+
+  create: true
+  name: ""
+  annotations: {}
+
+# Default AutoCache cluster configuration
+autocache:
+  # Whether to create a sample cluster
+  createSample: false
+  
+  # Cluster name
+  name: autocache-sample
+  
+  # Number of replicas
+  replicas: 3
+  
+  # Container image
+  image:
+    repository: autocache
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  # Resource requirements
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Ports
+  port: 6379
+  clusterPort: 16379
+  
+  # Storage configuration
+  storage:
+    enabled: false
+    storageClassName: ""
+    size: 10Gi
+  
+  # Cache configuration
+  config:
+    maxMemory: "512mb"
+    maxMemoryPolicy: "allkeys-lru"
+
+# Prometheus monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}

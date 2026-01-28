@@ -1,0 +1,16 @@
+apiVersion: v2
+name: autocache-operator
+description: Kubernetes operator for AutoCache distributed cache system
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - operator
+  - cache
+  - redis
+  - distributed
+home: https://github.com/10yihang/autocache
+sources:
+  - https://github.com/10yihang/autocache
+maintainers:
+  - name: AutoCache Team

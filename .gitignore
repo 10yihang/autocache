@@ -1,0 +1,49 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build outputs
+*.o
+*.a
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Sisyphus agent working files
+.sisyphus/
+
+# Docker images tar
+*.tar
+
+# Temp files
+*.tmp
+*.log
+*.bak
+
+# Go vendor (optional, uncomment if vendoring)
+# vendor/
+
+# Coverage
+coverage.out
+coverage.html
+
+# Documentation artifacts (keep for now)
+*.docx

@@ -1,0 +1,32 @@
+AutoCache Operator has been installed!
+
+To verify the installation:
+  kubectl get deployment {{ include "autocache.fullname" . }} -n {{ .Release.Namespace }}
+
+To create an AutoCache cluster:
+
+  kubectl apply -f - <<EOF
+  apiVersion: cache.autocache.io/v1alpha1
+  kind: AutoCache
+  metadata:
+    name: my-cache
+    namespace: {{ .Release.Namespace }}
+  spec:
+    replicas: 3
+    image: autocache:latest
+    port: 6379
+    resources:
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+      requests:
+        memory: 256Mi
+        cpu: 100m
+  EOF
+
+To check cluster status:
+  kubectl get autocache -n {{ .Release.Namespace }}
+  kubectl describe autocache my-cache -n {{ .Release.Namespace }}
+
+To monitor the operator logs:
+  kubectl logs -f deployment/{{ include "autocache.fullname" . }} -n {{ .Release.Namespace }}

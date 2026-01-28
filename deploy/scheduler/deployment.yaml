@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autocache-scheduler
+  namespace: autocache-system
+  labels:
+    component: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        component: scheduler
+    spec:
+      serviceAccountName: autocache-scheduler
+      containers:
+      - name: scheduler
+        image: autocache-scheduler:latest
+        command:
+        - /usr/local/bin/kube-scheduler
+        - --config=/etc/kubernetes/scheduler-config.yaml
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/kubernetes/scheduler-config.yaml
+          subPath: scheduler-config.yaml
+      volumes:
+      - name: config-volume
+        configMap:
+          name: scheduler-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+  namespace: autocache-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    profiles:
+      - schedulerName: autocache-scheduler
+        plugins:
+          filter:
+            enabled:
+              - name: AutoCacheTopologyAware
+              - name: AutoCacheLoadAware
+          score:
+            enabled:
+              - name: AutoCacheTopologyAware
+                weight: 10
+              - name: AutoCacheLoadAware
+                weight: 10

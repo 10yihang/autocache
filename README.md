@@ -4,6 +4,8 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](#development)
 
+English | [中文](README_CN.md)
+
 > Redis-compatible distributed cache system in Go, featuring tiered storage and Kubernetes-native management.
 
 AutoCache is a high-performance, distributed key-value store designed for cloud-native environments. It implements the RESP (Redis Serialization Protocol) to ensure compatibility with existing Redis clients while providing advanced features like tiered storage and seamless Kubernetes integration.

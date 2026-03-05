@@ -13,12 +13,19 @@ import (
 	"github.com/10yihang/autocache/pkg/protocolbuf"
 )
 
-type ClusterHandler struct {
-	cluster *cluster.Cluster
+// SlotKeyQuerier is the subset of protocol.ProtocolEngine needed by ClusterHandler.
+type SlotKeyQuerier interface {
+	KeysInSlot(slot uint16, count int) []string
+	CountKeysInSlot(slot uint16) int
 }
 
-func NewClusterHandler(c *cluster.Cluster) *ClusterHandler {
-	return &ClusterHandler{cluster: c}
+type ClusterHandler struct {
+	cluster *cluster.Cluster
+	engine  SlotKeyQuerier
+}
+
+func NewClusterHandler(c *cluster.Cluster, engine SlotKeyQuerier) *ClusterHandler {
+	return &ClusterHandler{cluster: c, engine: engine}
 }
 
 func (h *ClusterHandler) HandleCluster(conn redcon.Conn, args [][]byte) {
@@ -323,7 +330,24 @@ func (h *ClusterHandler) clusterGetKeysInSlot(conn redcon.Conn, args [][]byte) {
 		conn.WriteError("ERR wrong number of arguments for 'cluster getkeysinslot' command")
 		return
 	}
-	conn.WriteArray(0)
+
+	slot, err := strconv.ParseUint(bytes.BytesToString(args[0]), 10, 16)
+	if err != nil || slot >= hash.SlotCount {
+		conn.WriteError("ERR Invalid slot")
+		return
+	}
+
+	count, err := strconv.Atoi(bytes.BytesToString(args[1]))
+	if err != nil || count < 0 {
+		conn.WriteError("ERR Invalid count")
+		return
+	}
+
+	keys := h.engine.KeysInSlot(uint16(slot), count)
+	conn.WriteArray(len(keys))
+	for _, key := range keys {
+		conn.WriteBulkString(key)
+	}
 }
 
 func (h *ClusterHandler) clusterCountKeysInSlot(conn redcon.Conn, args [][]byte) {
@@ -331,7 +355,15 @@ func (h *ClusterHandler) clusterCountKeysInSlot(conn redcon.Conn, args [][]byte)
 		conn.WriteError("ERR wrong number of arguments for 'cluster countkeysinslot' command")
 		return
 	}
-	conn.WriteInt(0)
+
+	slot, err := strconv.ParseUint(bytes.BytesToString(args[0]), 10, 16)
+	if err != nil || slot >= hash.SlotCount {
+		conn.WriteError("ERR Invalid slot")
+		return
+	}
+
+	count := h.engine.CountKeysInSlot(uint16(slot))
+	conn.WriteInt(count)
 }
 
 func (h *ClusterHandler) CheckKeyRouting(key string) error {

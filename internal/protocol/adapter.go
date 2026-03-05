@@ -146,6 +146,14 @@ func (a *MemoryStoreAdapter) Close() error {
 	return a.store.Close()
 }
 
+func (a *MemoryStoreAdapter) KeysInSlot(slot uint16, count int) []string {
+	return a.store.KeysInSlot(slot, count)
+}
+
+func (a *MemoryStoreAdapter) CountKeysInSlot(slot uint16) int {
+	return a.store.CountKeysInSlot(slot)
+}
+
 var _ ProtocolEngine = (*MemoryStoreAdapter)(nil)
 
 var _ = pkgerrors.ErrKeyNotFound

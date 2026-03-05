@@ -51,6 +51,13 @@ func (m *mockConn) NetConn() net.Conn              { return nil }
 func (m *mockConn) RemoteAddr() string             { return "127.0.0.1:12345" }
 func (m *mockConn) Close() error                   { return nil }
 
+// mockSlotKeyQuerier is a no-op implementation of SlotKeyQuerier for tests
+// that don't exercise GETKEYSINSLOT / COUNTKEYSINSLOT.
+type mockSlotKeyQuerier struct{}
+
+func (m *mockSlotKeyQuerier) KeysInSlot(_ uint16, _ int) []string { return nil }
+func (m *mockSlotKeyQuerier) CountKeysInSlot(_ uint16) int        { return 0 }
+
 func newTestClusterHandler(t *testing.T) *ClusterHandler {
 	cfg := &cluster.Config{
 		NodeID:      "node1-test-id",
@@ -62,7 +69,7 @@ func newTestClusterHandler(t *testing.T) *ClusterHandler {
 	if err != nil {
 		t.Fatalf("failed to create cluster: %v", err)
 	}
-	return NewClusterHandler(c)
+	return NewClusterHandler(c, &mockSlotKeyQuerier{})
 }
 
 func TestClusterSetSlot_Migrating(t *testing.T) {

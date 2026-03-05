@@ -51,4 +51,8 @@ type ProtocolEngine interface {
 
 	// Lifecycle
 	Close() error
+
+	// Slot operations (for CLUSTER GETKEYSINSLOT / COUNTKEYSINSLOT)
+	KeysInSlot(slot uint16, count int) []string
+	CountKeysInSlot(slot uint16) int
 }

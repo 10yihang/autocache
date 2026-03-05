@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/protocol"
@@ -41,9 +42,9 @@ func main() {
 	}
 
 	store := memory.NewStore(memory.DefaultConfig())
+	store.SetSlotFunc(hash.KeySlot)
 	adapter := protocol.NewMemoryStoreAdapter(store)
 	server := protocol.NewServer(*addr, adapter)
-
 	var clusterInstance *cluster.Cluster
 	var stateManager *state.StateManager
 

@@ -310,3 +310,18 @@ func (s *Store) Close() error {
 func (s *Store) Scan(_ context.Context, cursor uint64, pattern string, count int) ([]string, uint64, error) {
 	return s.cache.Scan(cursor, pattern, count)
 }
+
+// SetSlotFunc sets the slot computation function for the slot index.
+func (s *Store) SetSlotFunc(fn func(string) uint16) {
+	s.cache.SetSlotFunc(fn)
+}
+
+// KeysInSlot returns up to count keys in the given slot.
+func (s *Store) KeysInSlot(slot uint16, count int) []string {
+	return s.cache.KeysInSlot(slot, count)
+}
+
+// CountKeysInSlot returns the number of keys in the given slot.
+func (s *Store) CountKeysInSlot(slot uint16) int {
+	return s.cache.CountKeysInSlot(slot)
+}

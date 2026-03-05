@@ -40,6 +40,15 @@ type ShardedCache struct {
 	shardCount uint64
 	seed       maphash.Seed
 	sampleSize int
+
+	// Slot index: slot number → set of keys in that slot.
+	// Protected by slotMu. Updated on Set/Delete.
+	slotMu    sync.RWMutex
+	slotIndex map[uint16]map[string]struct{}
+
+	// slotFunc computes the slot for a key. Injected to avoid
+	// importing cluster/hash (keeps engine layer dependency-free).
+	slotFunc func(key string) uint16
 }
 
 // ShardedCacheConfig configures the sharded cache.
@@ -80,6 +89,7 @@ func NewShardedCache(cfg ShardedCacheConfig) *ShardedCache {
 		shardCount: uint64(cfg.ShardCount),
 		seed:       maphash.MakeSeed(),
 		sampleSize: cfg.SampledEvict,
+		slotIndex:  make(map[uint16]map[string]struct{}),
 	}
 
 	for i := 0; i < cfg.ShardCount; i++ {
@@ -91,6 +101,12 @@ func NewShardedCache(cfg ShardedCacheConfig) *ShardedCache {
 	}
 
 	return sc
+}
+
+// SetSlotFunc sets the function used to compute slot numbers for keys.
+// Must be called before any Set/Delete operations.
+func (sc *ShardedCache) SetSlotFunc(fn func(string) uint16) {
+	sc.slotFunc = fn
 }
 
 func (sc *ShardedCache) hash(key string) uint64 {
@@ -206,6 +222,17 @@ func (sc *ShardedCache) Set(key string, value []byte, ttl time.Duration) error {
 
 	shard.mu.Unlock()
 
+	// Update slot index
+	if sc.slotFunc != nil {
+		slot := sc.slotFunc(key)
+		sc.slotMu.Lock()
+		if sc.slotIndex[slot] == nil {
+			sc.slotIndex[slot] = make(map[string]struct{})
+		}
+		sc.slotIndex[slot][key] = struct{}{}
+		sc.slotMu.Unlock()
+	}
+
 	shard.lfu.RecordAccess(hash)
 
 	return nil
@@ -256,6 +283,18 @@ func (sc *ShardedCache) SetNX(key string, value []byte, ttl time.Duration) (bool
 
 	shard.index[hash] = uint64(offset)
 	shard.lfu.RecordAccess(hash)
+
+	// Update slot index
+	if sc.slotFunc != nil {
+		slot := sc.slotFunc(key)
+		sc.slotMu.Lock()
+		if sc.slotIndex[slot] == nil {
+			sc.slotIndex[slot] = make(map[string]struct{})
+		}
+		sc.slotIndex[slot][key] = struct{}{}
+		sc.slotMu.Unlock()
+	}
+
 	return true, nil
 }
 
@@ -270,6 +309,20 @@ func (sc *ShardedCache) Delete(key string) bool {
 
 	if _, ok := shard.index[hash]; ok {
 		delete(shard.index, hash)
+
+		// Update slot index
+		if sc.slotFunc != nil {
+			slot := sc.slotFunc(key)
+			sc.slotMu.Lock()
+			if keys, ok := sc.slotIndex[slot]; ok {
+				delete(keys, key)
+				if len(keys) == 0 {
+					delete(sc.slotIndex, slot)
+				}
+			}
+			sc.slotMu.Unlock()
+		}
+
 		return true
 	}
 	return false
@@ -434,6 +487,10 @@ func (sc *ShardedCache) Clear() {
 		shard.lfu.Clear()
 		shard.mu.Unlock()
 	}
+
+	sc.slotMu.Lock()
+	sc.slotIndex = make(map[uint16]map[string]struct{})
+	sc.slotMu.Unlock()
 }
 
 func (sc *ShardedCache) RandomKeys(n int) []string {
@@ -600,6 +657,94 @@ func (sc *ShardedCache) sampledEvictLocked(shard *ZeroGCShard, volatileOnly ...b
 	return true
 }
 
+
+// KeysInSlot returns up to count keys belonging to the given slot.
+// If count <= 0, all keys are returned.
+// Keys that no longer exist (evicted/expired) are lazily cleaned.
+func (sc *ShardedCache) KeysInSlot(slot uint16, count int) []string {
+	sc.slotMu.RLock()
+	keySet, ok := sc.slotIndex[slot]
+	if !ok || len(keySet) == 0 {
+		sc.slotMu.RUnlock()
+		return nil
+	}
+	// Copy keys under read lock
+	candidates := make([]string, 0, len(keySet))
+	for k := range keySet {
+		candidates = append(candidates, k)
+	}
+	sc.slotMu.RUnlock()
+
+	// Filter to keys that actually exist (handles evictions/expirations)
+	result := make([]string, 0, len(candidates))
+	var stale []string
+	for _, key := range candidates {
+		if count > 0 && len(result) >= count {
+			break
+		}
+		if sc.Exists(key) {
+			result = append(result, key)
+		} else {
+			stale = append(stale, key)
+		}
+	}
+
+	// Lazy cleanup of stale keys
+	if len(stale) > 0 {
+		sc.slotMu.Lock()
+		if ks, ok := sc.slotIndex[slot]; ok {
+			for _, k := range stale {
+				delete(ks, k)
+			}
+			if len(ks) == 0 {
+				delete(sc.slotIndex, slot)
+			}
+		}
+		sc.slotMu.Unlock()
+	}
+
+	return result
+}
+
+// CountKeysInSlot returns the number of live keys in a slot.
+func (sc *ShardedCache) CountKeysInSlot(slot uint16) int {
+	sc.slotMu.RLock()
+	keySet, ok := sc.slotIndex[slot]
+	if !ok {
+		sc.slotMu.RUnlock()
+		return 0
+	}
+	candidates := make([]string, 0, len(keySet))
+	for k := range keySet {
+		candidates = append(candidates, k)
+	}
+	sc.slotMu.RUnlock()
+
+	count := 0
+	var stale []string
+	for _, key := range candidates {
+		if sc.Exists(key) {
+			count++
+		} else {
+			stale = append(stale, key)
+		}
+	}
+
+	if len(stale) > 0 {
+		sc.slotMu.Lock()
+		if ks, ok := sc.slotIndex[slot]; ok {
+			for _, k := range stale {
+				delete(ks, k)
+			}
+			if len(ks) == 0 {
+				delete(sc.slotIndex, slot)
+			}
+		}
+		sc.slotMu.Unlock()
+	}
+
+	return count
+}
 func (sc *ShardedCache) Scan(cursor uint64, pattern string, count int) ([]string, uint64, error) {
 	if count <= 0 {
 		count = 10

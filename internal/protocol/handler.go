@@ -41,7 +41,7 @@ func NewHandler(engine ProtocolEngine) *Handler {
 }
 
 func (h *Handler) SetCluster(c *cluster.Cluster) {
-	h.clusterHandler = commands.NewClusterHandler(c)
+	h.clusterHandler = commands.NewClusterHandler(c, h.engine)
 	h.router = router.NewClusterRouter(c)
 	h.clusterEnabled = true
 }

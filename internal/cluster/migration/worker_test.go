@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/protocol"
 )
@@ -62,6 +63,7 @@ func (m *mockSlotProvider) AddNode(nodeID, addr string) {
 
 func TestWorker_StartStop(t *testing.T) {
 	store := memory.NewStore(memory.DefaultConfig())
+	store.SetSlotFunc(hash.KeySlot)
 	adapter := protocol.NewMemoryStoreAdapter(store)
 	provider := newMockSlotProvider()
 
@@ -79,6 +81,7 @@ func TestWorker_StartStop(t *testing.T) {
 
 func TestWorker_NoMigration(t *testing.T) {
 	store := memory.NewStore(memory.DefaultConfig())
+	store.SetSlotFunc(hash.KeySlot)
 	adapter := protocol.NewMemoryStoreAdapter(store)
 	provider := newMockSlotProvider()
 
@@ -107,9 +110,11 @@ func TestWorker_NoMigration(t *testing.T) {
 
 func TestWorker_MigrateKey(t *testing.T) {
 	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
 	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
 
 	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
 	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
 	targetServer := protocol.NewServer(":0", targetAdapter)
 
@@ -157,9 +162,11 @@ func TestWorker_MigrateKey(t *testing.T) {
 
 func TestWorker_MigrateKeyWithTTL(t *testing.T) {
 	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
 	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
 
 	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
 	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
 	targetServer := protocol.NewServer(":0", targetAdapter)
 
@@ -202,9 +209,11 @@ func TestWorker_MigrateKeyWithTTL(t *testing.T) {
 
 func TestWorker_BatchSize(t *testing.T) {
 	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
 	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
 
 	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
 	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
 	targetServer := protocol.NewServer(":0", targetAdapter)
 

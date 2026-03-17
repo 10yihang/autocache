@@ -8,13 +8,16 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine/memory"
+	"github.com/10yihang/autocache/internal/engine/tiered"
 	"github.com/10yihang/autocache/internal/protocol"
 )
 
@@ -26,6 +29,10 @@ var (
 	bindAddr       = flag.String("bind", "127.0.0.1", "bind address for cluster")
 	seeds          = flag.String("seeds", "", "comma-separated seed nodes (host:port)")
 	dataDir        = flag.String("data-dir", "./data", "data directory for persistent state")
+
+	// Tiered storage flags
+	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
+	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
 
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
@@ -43,8 +50,43 @@ func main() {
 
 	store := memory.NewStore(memory.DefaultConfig())
 	store.SetSlotFunc(hash.KeySlot)
-	adapter := protocol.NewMemoryStoreAdapter(store)
-	server := protocol.NewServer(*addr, adapter)
+
+	var engine protocol.ProtocolEngine
+	var tieredMgr *tiered.Manager
+
+	if *tieredEnabled {
+		warmPath := *badgerPath
+		if warmPath == "" {
+			warmPath = filepath.Join(*dataDir, "warm")
+		}
+
+		tieredCfg := &tiered.Config{
+			Enabled:            true,
+			HotTierCapacity:    512 * 1024 * 1024, // 512MB
+			WarmTierEnabled:    true,
+			WarmTierPath:       warmPath,
+			ColdTierEnabled:    false,
+			MigrationInterval:  time.Minute,
+			MigrationBatchSize: 100,
+			HotAccessThreshold: 10,
+			HotIdleThreshold:   5 * time.Minute,
+			ColdIdleThreshold:  2 * time.Hour,
+		}
+
+		var err error
+		tieredMgr, err = tiered.NewManager(tieredCfg, store)
+		if err != nil {
+			log.Fatalf("Failed to create tiered manager: %v", err)
+		}
+		tieredMgr.Start()
+
+		engine = protocol.NewTieredStoreAdapter(tieredMgr, store)
+		log.Println("Tiered storage enabled, warm tier:", warmPath)
+	} else {
+		engine = protocol.NewMemoryStoreAdapter(store)
+	}
+
+	server := protocol.NewServer(*addr, engine)
 	var clusterInstance *cluster.Cluster
 	var stateManager *state.StateManager
 
@@ -112,6 +154,10 @@ func main() {
 		if err := clusterInstance.Stop(); err != nil {
 			log.Printf("Error stopping cluster: %v", err)
 		}
+	}
+
+	if tieredMgr != nil {
+		tieredMgr.Stop()
 	}
 
 	if err := server.Stop(); err != nil {

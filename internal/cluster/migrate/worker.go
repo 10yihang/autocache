@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/10yihang/autocache/internal/cluster/hash"
+
 	"github.com/10yihang/autocache/internal/engine"
 )
 
@@ -17,6 +17,7 @@ type MigrationEngine interface {
 	Scan(ctx context.Context, cursor uint64, pattern string, count int) ([]string, uint64, error)
 	GetEntry(ctx context.Context, key string) (*engine.Entry, error)
 	Del(ctx context.Context, keys ...string) (int64, error)
+	KeysInSlot(slot uint16, count int) []string
 }
 
 type MigrationStatus int
@@ -150,28 +151,7 @@ func (w *Worker) MigrateSlot(ctx context.Context, slot uint16, targetAddr string
 }
 
 func (w *Worker) getKeysInSlot(ctx context.Context, slot uint16) ([]string, error) {
-	var result []string
-	var cursor uint64
-
-	for {
-		keys, nextCursor, err := w.engine.Scan(ctx, cursor, "*", w.batchSize)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, key := range keys {
-			if hash.KeySlot(key) == slot {
-				result = append(result, key)
-			}
-		}
-
-		if nextCursor == 0 {
-			break
-		}
-		cursor = nextCursor
-	}
-
-	return result, nil
+	return w.engine.KeysInSlot(slot, 0), nil
 }
 
 func (w *Worker) migrateKey(ctx context.Context, key string, targetAddr string, replace bool) error {

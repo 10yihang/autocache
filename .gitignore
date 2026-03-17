@@ -50,3 +50,5 @@ coverage.html
 
 # Documentation artifacts (keep for now)
 *.docx
+
+/docs/

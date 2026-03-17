@@ -28,6 +28,7 @@ func waitForServer(t *testing.T, s *protocol.Server, timeout time.Duration) stri
 
 func TestWorker_MigrateSlot(t *testing.T) {
 	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
 	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
 	sourceServer := protocol.NewServer(":0", sourceAdapter)
 
@@ -40,6 +41,7 @@ func TestWorker_MigrateSlot(t *testing.T) {
 	_ = sourceAddr
 
 	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
 	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
 	targetServer := protocol.NewServer(":0", targetAdapter)
 
@@ -113,6 +115,7 @@ func TestWorker_MigrateSlot(t *testing.T) {
 
 func TestWorker_EmptySlot(t *testing.T) {
 	store := memory.NewStore(memory.DefaultConfig())
+	store.SetSlotFunc(hash.KeySlot)
 	adapter := protocol.NewMemoryStoreAdapter(store)
 	server := protocol.NewServer(":0", adapter)
 
@@ -145,6 +148,7 @@ func TestWorker_EmptySlot(t *testing.T) {
 
 func TestWorker_GetProgress(t *testing.T) {
 	store := memory.NewStore(memory.DefaultConfig())
+	store.SetSlotFunc(hash.KeySlot)
 	adapter := protocol.NewMemoryStoreAdapter(store)
 
 	worker := NewWorker(adapter)

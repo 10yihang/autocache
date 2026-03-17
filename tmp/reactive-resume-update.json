@@ -1,0 +1,375 @@
+{
+  "name": "柴若瑶-校招运营简历",
+  "slug": "cry",
+  "tags": [],
+  "isPublic": false,
+  "isLocked": false,
+  "data": {
+    "picture": {
+      "hidden": true,
+      "url": "",
+      "size": 80,
+      "rotation": 0,
+      "aspectRatio": 1,
+      "borderRadius": 0,
+      "borderColor": "rgba(0, 0, 0, 0.5)",
+      "borderWidth": 0,
+      "shadowColor": "rgba(0, 0, 0, 0.5)",
+      "shadowWidth": 0
+    },
+    "basics": {
+      "name": "柴若瑶",
+      "headline": "策略运营 / 数据运营 / 业务运营",
+      "email": "3182313124@qq.com",
+      "phone": "187-6702-6653",
+      "location": "",
+      "website": {
+        "url": "",
+        "label": ""
+      },
+      "customFields": [
+        {
+          "id": "basic-field-1",
+          "icon": "",
+          "text": "中共党员",
+          "link": ""
+        },
+        {
+          "id": "basic-field-2",
+          "icon": "",
+          "text": "22岁｜大四在读",
+          "link": ""
+        }
+      ]
+    },
+    "summary": {
+      "title": "个人简介",
+      "columns": 1,
+      "hidden": false,
+      "content": "<p>厦门大学嘉庚学院市场营销专业国际班本科生，专业排名 1/67，GPA 3.71/4.0。具备策略运营、数据分析、新媒体运营与大型调研项目经验，曾在滴滴代驾参与线索转化、成本模型、区域盘点、定价支持与监控看板建设，能够在业务场景中完成问题拆解、数据洞察与推动落地。</p>"
+    },
+    "sections": {
+      "profiles": {
+        "title": "个人主页",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      },
+      "experience": {
+        "title": "实习经历",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "exp-didi",
+            "hidden": false,
+            "company": "滴滴出行｜代驾事业部",
+            "position": "策略运营实习生",
+            "location": "",
+            "period": "",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": "<ul><li>统筹抖音、BOSS 直聘等多端下沉市场线索，优化宣发与触达策略，单月引入高质量线索 157 个，达成率 101.9%；独立搭建线索跟进漏斗与可视化看板，支撑大区转化与城市目标管理。</li><li>深度访谈华北片区 15+ 司服老板与 20+ 司机队长，协助拆解下沉市场成本 UE 模型，梳理原分润体系问题，推动新版分润规则在区域内试点落地。</li><li>参与全国 449 个下沉片区业务盘点，结合通勤圈等地理维度构建关联参考表，为三大区业务形态调研、动态定价与调价提供分析支持。</li><li>使用 SQL 提取业务数据并维护日度监控看板，每月输出全国司服业绩“红黑榜”；参与全国物料进销存与补货审批 SOP 优化，推动单均发货成本下降 8.58%。</li></ul>",
+            "roles": []
+          },
+          {
+            "id": "exp-food",
+            "hidden": false,
+            "company": "厦门市联华膳阶食品有限公司",
+            "position": "新媒体运营",
+            "location": "",
+            "period": "2023.07 - 2025.06",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": "<ul><li>围绕饭团产品策划并发布百家号、知乎、今日头条等平台原创内容 70+ 篇，累计获得 20,000+ 次推荐阅读，提升品牌在垂直领域的曝光与影响力。</li><li>主导小红书学生推广团队运营，统筹内容策划、作品产出、发布与复盘，累计推动作品 230+ 条，带来 15,000+ 次有效浏览，提升年轻客群触达率。</li></ul>",
+            "roles": []
+          }
+        ]
+      },
+      "education": {
+        "title": "教育经历",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "edu-1",
+            "hidden": false,
+            "school": "厦门大学嘉庚学院（国际班）",
+            "degree": "学士",
+            "area": "市场营销",
+            "grade": "GPA 3.71/4.0｜专业排名 1/67",
+            "location": "",
+            "period": "2022.09 - 2026.06",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": "<ul><li>主修课程：互联网消费洞察（100）、国际市场营销（98）、营销调研（97）、统计学原理（94）、消费者行为学（94）。</li><li>校内任职：班长、国际商务学院创新与创业中心部长、辅导员助理。</li><li>荣誉：国家奖学金、产学研创优秀青年。</li></ul>"
+          }
+        ]
+      },
+      "projects": {
+        "title": "项目经历",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "proj-county",
+            "hidden": false,
+            "name": "奔赴县域，不止中转｜基于 8 省 116 县的县漂青年流动趋势与青年友好型县域构建研究",
+            "period": "2024.07 - 2025.11",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": "<ul><li>作为项目负责人，搭建调研框架并主导问卷、访谈设计，带队深入福建、浙江、河南等 8 省 116 县，完成 3270 名县漂青年及政府相关人员实地访谈。</li><li>累计回收问卷 8000 份，清洗后保留有效样本 7308 份，运用相关性分析、T 检验、回归分析等方法完成深度挖掘，并构建青年友好型县域生态模型。</li><li>项目获第十九届“挑战杯”全国大学生课外学术作品竞赛全国一等奖、全国累进创新奖（全省唯一）。</li></ul>"
+          },
+          {
+            "id": "proj-brand",
+            "hidden": false,
+            "name": "侨新1950 品牌策划",
+            "period": "2024.01 - 2024.06",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": "<ul><li>运用 PESTEL、STP、3C 及竞品分析方法，识别永春老醋“高酸”细分市场空白，提出线上线下一体化品牌推广策略。</li><li>主导“侨新1950”品牌定位、产品系列规划与 IP 形象设计，协助推进体验巡展等落地方案，项目获全国高校商业精英挑战赛品牌策划竞赛中国区一等奖、最佳企业奖。</li></ul>"
+          }
+        ]
+      },
+      "skills": {
+        "title": "个人技能",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "skill-1",
+            "hidden": false,
+            "icon": "",
+            "name": "数据分析",
+            "proficiency": "熟练",
+            "level": 4,
+            "keywords": [
+              "Excel",
+              "SPSS",
+              "SQL（基础）"
+            ]
+          },
+          {
+            "id": "skill-2",
+            "hidden": false,
+            "icon": "",
+            "name": "运营策划",
+            "proficiency": "熟练",
+            "level": 4,
+            "keywords": [
+              "策略拆解",
+              "看板搭建",
+              "漏斗分析",
+              "项目统筹"
+            ]
+          },
+          {
+            "id": "skill-3",
+            "hidden": false,
+            "icon": "",
+            "name": "内容运营",
+            "proficiency": "熟练",
+            "level": 4,
+            "keywords": [
+              "小红书",
+              "知乎",
+              "百家号",
+              "今日头条"
+            ]
+          },
+          {
+            "id": "skill-4",
+            "hidden": false,
+            "icon": "",
+            "name": "设计与表达",
+            "proficiency": "熟练",
+            "level": 3,
+            "keywords": [
+              "PowerPoint",
+              "Photoshop",
+              "剪映",
+              "可画",
+              "创客贴"
+            ]
+          }
+        ]
+      },
+      "languages": {
+        "title": "语言能力",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "lang-1",
+            "hidden": false,
+            "language": "英语",
+            "fluency": "CET-4",
+            "level": 3
+          }
+        ]
+      },
+      "interests": {
+        "title": "兴趣爱好",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      },
+      "awards": {
+        "title": "荣誉奖项",
+        "columns": 1,
+        "hidden": false,
+        "items": [
+          {
+            "id": "award-1",
+            "hidden": false,
+            "title": "国家奖学金",
+            "awarder": "教育部",
+            "date": "",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": ""
+          },
+          {
+            "id": "award-2",
+            "hidden": false,
+            "title": "第十九届“挑战杯”全国大学生课外学术科技作品竞赛全国一等奖",
+            "awarder": "",
+            "date": "2024",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": ""
+          },
+          {
+            "id": "award-3",
+            "hidden": false,
+            "title": "中国国际大学生创新大赛国家铜奖",
+            "awarder": "",
+            "date": "2024",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": ""
+          },
+          {
+            "id": "award-4",
+            "hidden": false,
+            "title": "CUBEC 商业精英挑战赛品牌策划竞赛全国一等奖",
+            "awarder": "",
+            "date": "2024",
+            "website": {
+              "url": "",
+              "label": ""
+            },
+            "description": ""
+          }
+        ]
+      },
+      "certifications": {
+        "title": "证书",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      },
+      "publications": {
+        "title": "出版物",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      },
+      "volunteer": {
+        "title": "志愿经历",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      },
+      "references": {
+        "title": "推荐人",
+        "columns": 1,
+        "hidden": true,
+        "items": []
+      }
+    },
+    "customSections": [],
+    "metadata": {
+      "template": "onyx",
+      "layout": {
+        "sidebarWidth": 35,
+        "pages": [
+          {
+            "fullWidth": false,
+            "main": [
+              "summary",
+              "education",
+              "experience",
+              "projects"
+            ],
+            "sidebar": [
+              "skills",
+              "awards",
+              "languages"
+            ]
+          }
+        ]
+      },
+      "css": {
+        "enabled": false,
+        "value": ""
+      },
+      "page": {
+        "gapX": 4,
+        "gapY": 6,
+        "marginX": 14,
+        "marginY": 12,
+        "format": "a4",
+        "locale": "zh-CN",
+        "hideIcons": false
+      },
+      "design": {
+        "level": {
+          "icon": "star",
+          "type": "circle"
+        },
+        "colors": {
+          "primary": "rgba(220, 38, 38, 1)",
+          "text": "rgba(0, 0, 0, 1)",
+          "background": "rgba(255, 255, 255, 1)"
+        }
+      },
+      "typography": {
+        "body": {
+          "fontFamily": "IBM Plex Serif",
+          "fontWeights": [
+            "400",
+            "500"
+          ],
+          "fontSize": 10,
+          "lineHeight": 1.5
+        },
+        "heading": {
+          "fontFamily": "IBM Plex Serif",
+          "fontWeights": [
+            "600"
+          ],
+          "fontSize": 14,
+          "lineHeight": 1.5
+        }
+      },
+      "notes": "<p>待补充信息：滴滴出行策略运营实习生的准确起止时间。</p>"
+    }
+  }
+}

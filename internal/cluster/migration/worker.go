@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/10yihang/autocache/internal/cluster/hash"
+
 	"github.com/10yihang/autocache/internal/protocol"
 )
 
@@ -152,31 +152,7 @@ func (w *Worker) migrateSlotKeys(slot uint16, info MigrationInfo) error {
 }
 
 func (w *Worker) getKeysForSlot(ctx context.Context, slot uint16) ([]string, error) {
-	var matchingKeys []string
-	cursor := uint64(0)
-
-	for {
-		keys, nextCursor, err := w.engine.Scan(ctx, cursor, "*", 100)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, key := range keys {
-			if hash.KeySlot(key) == slot {
-				matchingKeys = append(matchingKeys, key)
-				if len(matchingKeys) >= w.batchSize*2 {
-					return matchingKeys, nil
-				}
-			}
-		}
-
-		if nextCursor == 0 {
-			break
-		}
-		cursor = nextCursor
-	}
-
-	return matchingKeys, nil
+	return w.engine.KeysInSlot(slot, w.batchSize*2), nil
 }
 
 func (w *Worker) migrateKey(ctx context.Context, key, targetAddr string) error {

@@ -1,0 +1,12 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "autocache.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "autocache.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  autocache-overview.json: |
+{{ .Files.Get "files/monitoring/grafana-dashboard.json" | indent 4 }}
+{{- end }}

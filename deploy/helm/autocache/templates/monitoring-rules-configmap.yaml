@@ -1,0 +1,12 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.alerts.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "autocache.fullname" . }}-prometheus-rules
+  labels:
+    {{- include "autocache.labels" . | nindent 4 }}
+    prometheus_rules: "1"
+data:
+  autocache-rules.yaml: |
+{{ .Files.Get "files/monitoring/prometheus-rules.yaml" | indent 4 }}
+{{- end }}

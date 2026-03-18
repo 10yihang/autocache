@@ -9,6 +9,7 @@ import (
 	"github.com/tidwall/redcon"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	metrics2 "github.com/10yihang/autocache/internal/metrics"
 )
 
 type Server struct {
@@ -94,6 +95,7 @@ func (s *Server) handleAccept(conn redcon.Conn) bool {
 	s.mu.Unlock()
 
 	log.Printf("Client connected: %s", conn.RemoteAddr())
+	metrics2.RecordConnection(1)
 	return true
 }
 
@@ -103,6 +105,7 @@ func (s *Server) handleClose(conn redcon.Conn, err error) {
 	s.mu.Unlock()
 
 	log.Printf("Client disconnected: %s", conn.RemoteAddr())
+	metrics2.RecordConnection(-1)
 }
 
 func (s *Server) handleCommand(conn redcon.Conn, cmd redcon.Command) {

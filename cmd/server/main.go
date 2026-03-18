@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/engine/tiered"
+	metrics2 "github.com/10yihang/autocache/internal/metrics"
 	"github.com/10yihang/autocache/internal/protocol"
 )
 
@@ -29,10 +33,12 @@ var (
 	bindAddr       = flag.String("bind", "127.0.0.1", "bind address for cluster")
 	seeds          = flag.String("seeds", "", "comma-separated seed nodes (host:port)")
 	dataDir        = flag.String("data-dir", "./data", "data directory for persistent state")
+	configPath     = flag.String("config", "", "path to config file")
 
 	// Tiered storage flags
 	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
 	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
+	metricsAddr   = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
 
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
@@ -42,14 +48,30 @@ var (
 
 func main() {
 	flag.Parse()
+	var fileConfig map[string]string
+	if *configPath != "" {
+		cfg, err := loadConfigFile(*configPath)
+		if err != nil {
+			log.Fatalf("Failed to load config file: %v", err)
+		}
+		fileConfig = cfg
+		applyConfig(cfg)
+	}
 
 	if *cliMode {
 		runCLI(*cliHost, *cliPort, flag.Args())
 		return
 	}
 
-	store := memory.NewStore(memory.DefaultConfig())
+	store := memory.NewStore(buildMemoryConfigFromConfig(fileConfig))
 	store.SetSlotFunc(hash.KeySlot)
+	metrics2.InitInfo("dev", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	metricsExporter := metrics2.NewExporter(*metricsAddr)
+	go func() {
+		if err := metricsExporter.Start(); err != nil && err.Error() != "http: Server closed" {
+			log.Printf("Metrics exporter stopped with error: %v", err)
+		}
+	}()
 
 	var engine protocol.ProtocolEngine
 	var tieredMgr *tiered.Manager
@@ -159,6 +181,9 @@ func main() {
 	if tieredMgr != nil {
 		tieredMgr.Stop()
 	}
+	if err := metricsExporter.Stop(); err != nil {
+		log.Printf("Error stopping metrics exporter: %v", err)
+	}
 
 	if err := server.Stop(); err != nil {
 		log.Printf("Error stopping server: %v", err)
@@ -166,6 +191,88 @@ func main() {
 	if err := store.Close(); err != nil {
 		log.Printf("Error closing store: %v", err)
 	}
+}
+
+func loadConfigFile(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	config := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		config[parts[0]] = strings.Join(parts[1:], " ")
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+func applyConfig(cfg map[string]string) {
+	if v, ok := cfg["port"]; ok && v != "" {
+		*addr = ":" + v
+	}
+	if v, ok := cfg["cluster-port"]; ok && v != "" {
+		*clusterPort = parseInt(v, *clusterPort)
+	}
+	if v, ok := cfg["cluster-enabled"]; ok {
+		*clusterEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+}
+
+func buildMemoryConfigFromConfig(cfg map[string]string) *memory.Config {
+	memCfg := memory.DefaultConfig()
+	if cfg == nil {
+		return memCfg
+	}
+	if v, ok := cfg["maxmemory"]; ok && v != "" {
+		if bytes, err := parseMemoryBytes(v); err == nil {
+			memCfg.MaxMemory = bytes
+		}
+	}
+	if v, ok := cfg["maxmemory-policy"]; ok && v != "" {
+		memCfg.EvictPolicy = v
+	}
+	return memCfg
+}
+
+func parseMemoryBytes(value string) (int64, error) {
+	v := strings.TrimSpace(strings.ToLower(value))
+	multiplier := int64(1)
+	for _, suffix := range []struct {
+		suffix     string
+		multiplier int64
+	}{
+		{"gb", 1024 * 1024 * 1024},
+		{"g", 1024 * 1024 * 1024},
+		{"mb", 1024 * 1024},
+		{"m", 1024 * 1024},
+		{"kb", 1024},
+		{"k", 1024},
+		{"b", 1},
+	} {
+		if strings.HasSuffix(v, suffix.suffix) {
+			multiplier = suffix.multiplier
+			v = strings.TrimSpace(strings.TrimSuffix(v, suffix.suffix))
+			break
+		}
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return n * multiplier, nil
 }
 
 func parseInt(s string, defaultVal int) int {

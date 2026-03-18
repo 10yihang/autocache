@@ -1,0 +1,31 @@
+{
+  "title": "AutoCache Overview",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Command Throughput",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(autocache_commands_total{status=\"success\"}[5m])) by (cmd)", "legendFormat": "{{cmd}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Latency p99",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(autocache_command_duration_seconds_bucket[5m])) by (le, cmd))", "legendFormat": "{{cmd}} p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tiered Keys",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "autocache_tiered_keys_total", "legendFormat": "{{tier}}" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

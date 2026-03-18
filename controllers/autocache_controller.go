@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -51,7 +52,8 @@ type AutoCacheReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	sendCommandFn func(ctx context.Context, addr string, command string) error
+	sendCommandFn     func(ctx context.Context, addr string, command string) error
+	newScaleManagerFn func(client.Client) *ScaleManager
 }
 
 // +kubebuilder:rbac:groups=cache.autocache.io,resources=autocaches,verbs=get;list;watch;create;update;patch;delete
@@ -118,6 +120,11 @@ func (r *AutoCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Reconcile Client Service
 	if err := r.reconcileClientService(ctx, ac); err != nil {
 		logger.Error(err, "Failed to reconcile Client Service")
+		return ctrl.Result{RequeueAfter: requeueAfterError}, err
+	}
+
+	if err := r.reconcileMetricsService(ctx, ac); err != nil {
+		logger.Error(err, "Failed to reconcile Metrics Service")
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
@@ -323,6 +330,51 @@ func (r *AutoCacheReconciler) buildClientService(ac *cachev1alpha1.AutoCache) *c
 					Name:     "redis",
 					Port:     ac.Spec.Port,
 					Protocol: corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+}
+
+func (r *AutoCacheReconciler) reconcileMetricsService(ctx context.Context, ac *cachev1alpha1.AutoCache) error {
+	svc := r.buildMetricsService(ac)
+	if err := controllerutil.SetControllerReference(ac, svc, r.Scheme); err != nil {
+		return err
+	}
+
+	existingSvc := &corev1.Service{}
+	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, existingSvc)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return r.Create(ctx, svc)
+		}
+		return err
+	}
+	return nil
+}
+
+func (r *AutoCacheReconciler) buildMetricsService(ac *cachev1alpha1.AutoCache) *corev1.Service {
+	labels := ac.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels["cache.autocache.io/metrics"] = "true"
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ac.Name + "-metrics",
+			Namespace: ac.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: ac.GetSelectorLabels(),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "metrics",
+					Port:       9121,
+					TargetPort: intstr.FromString("metrics"),
+					Protocol:   corev1.ProtocolTCP,
 				},
 			},
 		},

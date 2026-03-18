@@ -22,7 +22,7 @@ rbac:
   create: true
 
 # ServiceAccount configuration
-
+serviceAccount:
   create: true
   name: ""
   annotations: {}
@@ -71,7 +71,14 @@ autocache:
 # Prometheus monitoring
 monitoring:
   enabled: true
+  metricsService:
+    enabled: true
+    port: 8080
   serviceMonitor:
     enabled: false
     interval: 30s
     labels: {}
+  dashboard:
+    enabled: true
+  alerts:
+    enabled: true

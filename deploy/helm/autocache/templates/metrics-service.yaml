@@ -1,0 +1,18 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.metricsService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "autocache.fullname" . }}-metrics
+  labels:
+    {{- include "autocache.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    {{- include "autocache.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+  ports:
+    - name: metrics
+      port: {{ .Values.monitoring.metricsService.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

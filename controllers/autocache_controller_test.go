@@ -94,6 +94,12 @@ func TestAutoCacheReconciler_Reconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get Service: %v", err)
 	}
+
+	metricsSvc := &corev1.Service{}
+	err = cl.Get(context.Background(), types.NamespacedName{Name: "test-cache-metrics", Namespace: "default"}, metricsSvc)
+	if err != nil {
+		t.Fatalf("Failed to get Metrics Service: %v", err)
+	}
 }
 
 func TestInitializeCluster_Bootstrap(t *testing.T) {

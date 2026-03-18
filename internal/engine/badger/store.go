@@ -12,6 +12,13 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
+func init() {
+	gob.Register(map[string]string{})
+	gob.Register([]string{})
+	gob.Register(map[string]struct{}{})
+	gob.Register(map[string]float64{})
+}
+
 // Store implements engine.Engine using BadgerDB
 type Store struct {
 	db *badger.DB
@@ -72,7 +79,7 @@ func (s *Store) Set(ctx context.Context, key string, value interface{}, ttl time
 	entry := engine.Entry{
 		Key:       key,
 		Value:     value,
-		Type:      engine.TypeString, // Default to string for now
+		Type:      inferValueType(value),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -93,6 +100,23 @@ func (s *Store) Set(ctx context.Context, key string, value interface{}, ttl time
 		}
 		return txn.SetEntry(e)
 	})
+}
+
+func inferValueType(value interface{}) engine.ValueType {
+	switch value.(type) {
+	case string, []byte:
+		return engine.TypeString
+	case map[string]string:
+		return engine.TypeHash
+	case []string:
+		return engine.TypeList
+	case map[string]struct{}:
+		return engine.TypeSet
+	case map[string]float64:
+		return engine.TypeZSet
+	default:
+		return engine.TypeString
+	}
 }
 
 // Del deletes keys

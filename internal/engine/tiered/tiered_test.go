@@ -113,3 +113,18 @@ func TestTieredStorage(t *testing.T) {
 		}
 	}
 }
+
+func TestTieredStorage_ColdTierExperimental(t *testing.T) {
+	hotTier := memory.NewStore(memory.DefaultConfig())
+	defer hotTier.Close()
+
+	cfg := tiered.DefaultConfig()
+	cfg.WarmTierEnabled = false
+	cfg.ColdTierEnabled = true
+	cfg.ColdTierEndpoint = "http://127.0.0.1:9000"
+	cfg.ColdTierBucket = "autocache"
+
+	if _, err := tiered.NewManager(cfg, hotTier); err == nil {
+		t.Fatal("expected cold tier initialization to fail while experimental")
+	}
+}

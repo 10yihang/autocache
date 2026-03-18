@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/10yihang/autocache/internal/engine"
@@ -15,10 +16,7 @@ type Store struct {
 
 // NewStore creates a new S3 store
 func NewStore(endpoint, bucket string) (*Store, error) {
-	return &Store{
-		endpoint: endpoint,
-		bucket:   bucket,
-	}, nil
+	return nil, fmt.Errorf("cold tier is experimental and not implemented: endpoint=%s bucket=%s", endpoint, bucket)
 }
 
 // Get gets a key

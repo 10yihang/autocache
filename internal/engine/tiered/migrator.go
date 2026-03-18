@@ -3,6 +3,9 @@ package tiered
 import (
 	"context"
 	"time"
+
+	"github.com/10yihang/autocache/internal/engine"
+	metrics2 "github.com/10yihang/autocache/internal/metrics"
 )
 
 // Migrator handles data migration between tiers
@@ -72,30 +75,26 @@ func (m *Migrator) RunMigration() {
 }
 
 func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType) error {
-	var value string
+	var value interface{}
 	var err error
 	var ttl time.Duration
+	var entry *engine.Entry
 
 	// Get from source
 	switch from {
 	case TierHot:
-		value, err = m.manager.hotTier.Get(ctx, key)
+		entry, err = m.manager.hotTier.GetEntry(ctx, key)
 		if err == nil {
-			// Get TTL if possible
-			ttl, _ = m.manager.hotTier.TTL(ctx, key)
+			value = entry.Value
+			ttl = entryTTL(entry)
 		}
 	case TierWarm:
 		if m.manager.warmTier != nil {
-			entry, e := m.manager.warmTier.Get(ctx, key)
-			if e == nil {
-				value = entry.Value.(string)
-				if entry.ExpireAt.IsZero() {
-					ttl = 0
-				} else {
-					ttl = time.Until(entry.ExpireAt)
-				}
+			entry, err = m.manager.warmTier.Get(ctx, key)
+			if err == nil {
+				value = entry.Value
+				ttl = entryTTL(entry)
 			}
-			err = e
 		}
 	}
 
@@ -133,6 +132,10 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 		}
 	}
 
+	if from == TierHot {
+		m.manager.migrationsDown.Add(1)
+		metrics2.RecordTieredMigration("down")
+	}
 	m.manager.stats.UpdateTier(key, to)
 	return nil
 }

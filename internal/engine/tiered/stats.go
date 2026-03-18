@@ -179,6 +179,19 @@ func (sc *StatsCollector) GetKeysByTier(tier TierType) []string {
 	return keys
 }
 
+func (sc *StatsCollector) GetSizeByTier(tier TierType) int64 {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+
+	var total int64
+	for _, stats := range sc.stats {
+		if stats.Tier == tier {
+			total += stats.Size
+		}
+	}
+	return total
+}
+
 // GetColdKeys gets cold keys for demotion
 func (sc *StatsCollector) GetColdKeys(idleThreshold time.Duration, countThreshold uint64) []string {
 	sc.mu.RLock()

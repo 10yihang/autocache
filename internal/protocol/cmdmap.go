@@ -18,7 +18,7 @@ type cmdEntry struct {
 // cmdMap is a hash-based command lookup table.
 // Uses a simple open-addressing hash table for fast lookups.
 type cmdMap struct {
-	buckets [64]cmdEntry // Power of 2 for fast modulo
+	buckets [128]cmdEntry // Power of 2 for fast modulo
 	h       *Handler
 }
 
@@ -45,6 +45,34 @@ func (cm *cmdMap) registerAll() {
 	cm.register([]byte("PSETEX"), cm.h.cmdPSetEX)
 	cm.register([]byte("MGET"), cm.h.cmdMGet)
 	cm.register([]byte("MSET"), cm.h.cmdMSet)
+	cm.register([]byte("HGET"), cm.h.cmdHGet)
+	cm.register([]byte("HSET"), cm.h.cmdHSet)
+	cm.register([]byte("HDEL"), cm.h.cmdHDel)
+	cm.register([]byte("HEXISTS"), cm.h.cmdHExists)
+	cm.register([]byte("HGETALL"), cm.h.cmdHGetAll)
+	cm.register([]byte("HKEYS"), cm.h.cmdHKeys)
+	cm.register([]byte("HVALS"), cm.h.cmdHVals)
+	cm.register([]byte("HLEN"), cm.h.cmdHLen)
+	cm.register([]byte("LPUSH"), cm.h.cmdLPush)
+	cm.register([]byte("RPUSH"), cm.h.cmdRPush)
+	cm.register([]byte("LPOP"), cm.h.cmdLPop)
+	cm.register([]byte("RPOP"), cm.h.cmdRPop)
+	cm.register([]byte("LRANGE"), cm.h.cmdLRange)
+	cm.register([]byte("LLEN"), cm.h.cmdLLen)
+	cm.register([]byte("LINDEX"), cm.h.cmdLIndex)
+	cm.register([]byte("LSET"), cm.h.cmdLSet)
+	cm.register([]byte("LTRIM"), cm.h.cmdLTrim)
+	cm.register([]byte("SADD"), cm.h.cmdSAdd)
+	cm.register([]byte("SREM"), cm.h.cmdSRem)
+	cm.register([]byte("SMEMBERS"), cm.h.cmdSMembers)
+	cm.register([]byte("SISMEMBER"), cm.h.cmdSIsMember)
+	cm.register([]byte("SCARD"), cm.h.cmdSCard)
+	cm.register([]byte("ZADD"), cm.h.cmdZAdd)
+	cm.register([]byte("ZREM"), cm.h.cmdZRem)
+	cm.register([]byte("ZRANGE"), cm.h.cmdZRange)
+	cm.register([]byte("ZSCORE"), cm.h.cmdZScore)
+	cm.register([]byte("ZRANK"), cm.h.cmdZRank)
+	cm.register([]byte("ZCARD"), cm.h.cmdZCard)
 	cm.register([]byte("INCR"), cm.h.cmdIncr)
 	cm.register([]byte("INCRBY"), cm.h.cmdIncrBy)
 	cm.register([]byte("DECR"), cm.h.cmdDecr)
@@ -82,11 +110,11 @@ func (cm *cmdMap) registerAll() {
 
 func (cm *cmdMap) register(name []byte, handler CommandHandler) {
 	hash := HashBytes(name)
-	idx := hash & 63 // len(buckets) - 1
+	idx := hash & 127 // len(buckets) - 1
 
 	// Linear probing for collision resolution
-	for i := 0; i < 64; i++ {
-		pos := (idx + uint32(i)) & 63
+	for i := 0; i < 128; i++ {
+		pos := (idx + uint32(i)) & 127
 		if cm.buckets[pos].name == nil {
 			cm.buckets[pos] = cmdEntry{name: name, handler: handler}
 			return
@@ -101,11 +129,11 @@ func (cm *cmdMap) register(name []byte, handler CommandHandler) {
 // Returns nil if command not found.
 func (cm *cmdMap) Lookup(name []byte) CommandHandler {
 	hash := HashBytes(name)
-	idx := hash & 63
+	idx := hash & 127
 
 	// Linear probing
-	for i := 0; i < 64; i++ {
-		pos := (idx + uint32(i)) & 63
+	for i := 0; i < 128; i++ {
+		pos := (idx + uint32(i)) & 127
 		entry := &cm.buckets[pos]
 		if entry.name == nil {
 			return nil

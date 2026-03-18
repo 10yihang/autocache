@@ -2,6 +2,7 @@ package memory
 
 import (
 	"hash/maphash"
+	"sort"
 	"sync"
 	"time"
 )
@@ -657,7 +658,6 @@ func (sc *ShardedCache) sampledEvictLocked(shard *ZeroGCShard, volatileOnly ...b
 	return true
 }
 
-
 // KeysInSlot returns up to count keys belonging to the given slot.
 // If count <= 0, all keys are returned.
 // Keys that no longer exist (evicted/expired) are lazily cleaned.
@@ -771,6 +771,7 @@ func (sc *ShardedCache) Scan(cursor uint64, pattern string, count int) ([]string
 				keys = append(keys, key)
 			}
 		}
+		sort.Strings(keys)
 		shard.mu.RUnlock()
 
 		for i := posInShard; i < len(keys) && len(result) < count; i++ {

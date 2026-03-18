@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,9 +14,12 @@ import (
 
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/router"
+	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/memory"
+	metrics2 "github.com/10yihang/autocache/internal/metrics"
 	"github.com/10yihang/autocache/internal/protocol/commands"
 	"github.com/10yihang/autocache/pkg/bytes"
+	pkgerrors "github.com/10yihang/autocache/pkg/errors"
 	"github.com/10yihang/autocache/pkg/protocolbuf"
 )
 
@@ -60,6 +64,34 @@ func (h *Handler) registerCommands() {
 	h.commands["PSETEX"] = h.cmdPSetEX
 	h.commands["MGET"] = h.cmdMGet
 	h.commands["MSET"] = h.cmdMSet
+	h.commands["HGET"] = h.cmdHGet
+	h.commands["HSET"] = h.cmdHSet
+	h.commands["HDEL"] = h.cmdHDel
+	h.commands["HEXISTS"] = h.cmdHExists
+	h.commands["HGETALL"] = h.cmdHGetAll
+	h.commands["HKEYS"] = h.cmdHKeys
+	h.commands["HVALS"] = h.cmdHVals
+	h.commands["HLEN"] = h.cmdHLen
+	h.commands["LPUSH"] = h.cmdLPush
+	h.commands["RPUSH"] = h.cmdRPush
+	h.commands["LPOP"] = h.cmdLPop
+	h.commands["RPOP"] = h.cmdRPop
+	h.commands["LRANGE"] = h.cmdLRange
+	h.commands["LLEN"] = h.cmdLLen
+	h.commands["LINDEX"] = h.cmdLIndex
+	h.commands["LSET"] = h.cmdLSet
+	h.commands["LTRIM"] = h.cmdLTrim
+	h.commands["SADD"] = h.cmdSAdd
+	h.commands["SREM"] = h.cmdSRem
+	h.commands["SMEMBERS"] = h.cmdSMembers
+	h.commands["SISMEMBER"] = h.cmdSIsMember
+	h.commands["SCARD"] = h.cmdSCard
+	h.commands["ZADD"] = h.cmdZAdd
+	h.commands["ZREM"] = h.cmdZRem
+	h.commands["ZRANGE"] = h.cmdZRange
+	h.commands["ZSCORE"] = h.cmdZScore
+	h.commands["ZRANK"] = h.cmdZRank
+	h.commands["ZCARD"] = h.cmdZCard
 	h.commands["INCR"] = h.cmdIncr
 	h.commands["INCRBY"] = h.cmdIncrBy
 	h.commands["DECR"] = h.cmdDecr
@@ -95,19 +127,27 @@ func (h *Handler) registerCommands() {
 
 func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes []byte, args [][]byte) {
 	ToUpperInPlace(cmdBytes)
+	cmdName := bytes.BytesToString(cmdBytes)
+	start := time.Now()
+	record := func(success bool) {
+		metrics2.RecordCommand(cmdName, time.Since(start), success)
+	}
 
 	if IsClusterCmd(cmdBytes) {
 		if h.clusterHandler == nil {
 			conn.WriteError("ERR This instance has cluster support disabled")
+			record(false)
 			return
 		}
 		h.clusterHandler.HandleCluster(conn, args)
+		record(true)
 		return
 	}
 
 	fn := h.cmdMap.Lookup(cmdBytes)
 	if fn == nil {
 		conn.WriteError("ERR unknown command '" + bytes.BytesToString(cmdBytes) + "'")
+		record(false)
 		return
 	}
 
@@ -141,22 +181,32 @@ func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes [
 	}
 
 	fn(ctx, conn, args)
+	record(true)
 	clearAskingFlag(conn)
 }
 
 func (h *Handler) Execute(ctx context.Context, conn redcon.Conn, cmd string, args [][]byte) {
+	cmd = strings.ToUpper(cmd)
+	start := time.Now()
+	record := func(success bool) {
+		metrics2.RecordCommand(cmd, time.Since(start), success)
+	}
+
 	if cmd == "CLUSTER" {
 		if h.clusterHandler == nil {
 			conn.WriteError("ERR This instance has cluster support disabled")
+			record(false)
 			return
 		}
 		h.clusterHandler.HandleCluster(conn, args)
+		record(true)
 		return
 	}
 
 	fn, ok := h.commands[cmd]
 	if !ok {
 		conn.WriteError("ERR unknown command '" + cmd + "'")
+		record(false)
 		return
 	}
 
@@ -188,11 +238,16 @@ func (h *Handler) Execute(ctx context.Context, conn redcon.Conn, cmd string, arg
 	}
 
 	fn(ctx, conn, args)
+	record(true)
 	clearAskingFlag(conn)
 }
 
 var keyCommands = map[string]bool{
 	"GET": true, "SET": true, "SETNX": true, "SETEX": true, "PSETEX": true, "GETSET": true,
+	"HGET": true, "HSET": true, "HDEL": true, "HEXISTS": true, "HGETALL": true, "HKEYS": true, "HVALS": true, "HLEN": true,
+	"LPUSH": true, "RPUSH": true, "LPOP": true, "RPOP": true, "LRANGE": true, "LLEN": true, "LINDEX": true, "LSET": true, "LTRIM": true,
+	"SADD": true, "SREM": true, "SMEMBERS": true, "SISMEMBER": true, "SCARD": true,
+	"ZADD": true, "ZREM": true, "ZRANGE": true, "ZSCORE": true, "ZRANK": true, "ZCARD": true,
 	"INCR": true, "INCRBY": true, "DECR": true, "DECRBY": true, "APPEND": true, "STRLEN": true,
 	"DEL": true, "EXISTS": true, "TYPE": true, "RENAME": true,
 	"EXPIRE": true, "EXPIREAT": true, "PEXPIRE": true, "TTL": true, "PTTL": true, "PERSIST": true,
@@ -293,7 +348,7 @@ func (h *Handler) cmdGet(ctx context.Context, conn redcon.Conn, args [][]byte) {
 	key := bytes.BytesToString(args[0])
 	val, err := h.engine.GetBytes(ctx, key)
 	if err != nil {
-		conn.WriteNull()
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteBulk(val)
@@ -451,6 +506,454 @@ func (h *Handler) cmdMSet(ctx context.Context, conn redcon.Conn, args [][]byte) 
 	conn.WriteString("OK")
 }
 
+func (h *Handler) cmdHGet(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'hget' command")
+		return
+	}
+
+	value, err := h.engine.HGet(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteBulkString(value)
+}
+
+func (h *Handler) cmdHSet(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 3 || len(args)%2 == 0 {
+		conn.WriteError("ERR wrong number of arguments for 'hset' command")
+		return
+	}
+
+	pairs := make([]interface{}, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		pairs = append(pairs, bytes.BytesToString(arg))
+	}
+
+	added, err := h.engine.HSet(ctx, bytes.BytesToString(args[0]), pairs...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(added)
+}
+
+func (h *Handler) cmdHDel(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 2 {
+		conn.WriteError("ERR wrong number of arguments for 'hdel' command")
+		return
+	}
+
+	fields := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		fields = append(fields, bytes.BytesToString(arg))
+	}
+
+	deleted, err := h.engine.HDel(ctx, bytes.BytesToString(args[0]), fields...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(deleted)
+}
+
+func (h *Handler) cmdHExists(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'hexists' command")
+		return
+	}
+
+	exists, err := h.engine.HExists(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	if exists {
+		conn.WriteInt(1)
+		return
+	}
+	conn.WriteInt(0)
+}
+
+func (h *Handler) cmdHGetAll(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'hgetall' command")
+		return
+	}
+
+	values, err := h.engine.HGetAll(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+
+	keys := make([]string, 0, len(values))
+	for field := range values {
+		keys = append(keys, field)
+	}
+	sort.Strings(keys)
+
+	conn.WriteArray(len(keys) * 2)
+	for _, field := range keys {
+		conn.WriteBulkString(field)
+		conn.WriteBulkString(values[field])
+	}
+}
+
+func (h *Handler) cmdHKeys(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'hkeys' command")
+		return
+	}
+
+	keys, err := h.engine.HKeys(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteArray(len(keys))
+	for _, field := range keys {
+		conn.WriteBulkString(field)
+	}
+}
+
+func (h *Handler) cmdHVals(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'hvals' command")
+		return
+	}
+
+	values, err := h.engine.HVals(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteArray(len(values))
+	for _, value := range values {
+		conn.WriteBulkString(value)
+	}
+}
+
+func (h *Handler) cmdHLen(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'hlen' command")
+		return
+	}
+
+	length, err := h.engine.HLen(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(length)
+}
+
+func (h *Handler) cmdLPush(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	h.cmdPushList(ctx, conn, args, true)
+}
+
+func (h *Handler) cmdRPush(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	h.cmdPushList(ctx, conn, args, false)
+}
+
+func (h *Handler) cmdLPop(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	h.cmdPopList(ctx, conn, args, true)
+}
+
+func (h *Handler) cmdRPop(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	h.cmdPopList(ctx, conn, args, false)
+}
+
+func (h *Handler) cmdLRange(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 3 {
+		conn.WriteError("ERR wrong number of arguments for 'lrange' command")
+		return
+	}
+
+	start, err := strconv.ParseInt(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+	stop, err := strconv.ParseInt(bytes.BytesToString(args[2]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+
+	values, err := h.engine.LRange(ctx, bytes.BytesToString(args[0]), start, stop)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteArray(len(values))
+	for _, value := range values {
+		conn.WriteBulkString(value)
+	}
+}
+
+func (h *Handler) cmdLLen(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'llen' command")
+		return
+	}
+
+	length, err := h.engine.LLen(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(length)
+}
+
+func (h *Handler) cmdLIndex(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'lindex' command")
+		return
+	}
+
+	index, err := strconv.ParseInt(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+
+	value, err := h.engine.LIndex(ctx, bytes.BytesToString(args[0]), index)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteBulkString(value)
+}
+
+func (h *Handler) cmdLSet(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 3 {
+		conn.WriteError("ERR wrong number of arguments for 'lset' command")
+		return
+	}
+
+	index, err := strconv.ParseInt(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+
+	if err := h.engine.LSet(ctx, bytes.BytesToString(args[0]), index, bytes.BytesToString(args[2])); err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteString("OK")
+}
+
+func (h *Handler) cmdLTrim(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 3 {
+		conn.WriteError("ERR wrong number of arguments for 'ltrim' command")
+		return
+	}
+
+	start, err := strconv.ParseInt(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+	stop, err := strconv.ParseInt(bytes.BytesToString(args[2]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+
+	if err := h.engine.LTrim(ctx, bytes.BytesToString(args[0]), start, stop); err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteString("OK")
+}
+
+func (h *Handler) cmdSAdd(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 2 {
+		conn.WriteError("ERR wrong number of arguments for 'sadd' command")
+		return
+	}
+	members := make([]interface{}, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, bytes.BytesToString(arg))
+	}
+	added, err := h.engine.SAdd(ctx, bytes.BytesToString(args[0]), members...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(added)
+}
+
+func (h *Handler) cmdSRem(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 2 {
+		conn.WriteError("ERR wrong number of arguments for 'srem' command")
+		return
+	}
+	members := make([]interface{}, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, bytes.BytesToString(arg))
+	}
+	removed, err := h.engine.SRem(ctx, bytes.BytesToString(args[0]), members...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(removed)
+}
+
+func (h *Handler) cmdSMembers(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'smembers' command")
+		return
+	}
+	members, err := h.engine.SMembers(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteArray(len(members))
+	for _, member := range members {
+		conn.WriteBulkString(member)
+	}
+}
+
+func (h *Handler) cmdSIsMember(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'sismember' command")
+		return
+	}
+	exists, err := h.engine.SIsMember(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	if exists {
+		conn.WriteInt(1)
+		return
+	}
+	conn.WriteInt(0)
+}
+
+func (h *Handler) cmdSCard(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'scard' command")
+		return
+	}
+	count, err := h.engine.SCard(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(count)
+}
+
+func (h *Handler) cmdZAdd(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 3 || len(args)%2 == 0 {
+		conn.WriteError("ERR wrong number of arguments for 'zadd' command")
+		return
+	}
+	members := make([]engine.ZMember, 0, (len(args)-1)/2)
+	for i := 1; i < len(args); i += 2 {
+		score, err := strconv.ParseFloat(bytes.BytesToString(args[i]), 64)
+		if err != nil {
+			conn.WriteError("ERR value is not a valid float")
+			return
+		}
+		members = append(members, engine.ZMember{Score: score, Member: bytes.BytesToString(args[i+1])})
+	}
+	added, err := h.engine.ZAdd(ctx, bytes.BytesToString(args[0]), members...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(added)
+}
+
+func (h *Handler) cmdZRem(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) < 2 {
+		conn.WriteError("ERR wrong number of arguments for 'zrem' command")
+		return
+	}
+	members := make([]string, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		members = append(members, bytes.BytesToString(arg))
+	}
+	removed, err := h.engine.ZRem(ctx, bytes.BytesToString(args[0]), members...)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(removed)
+}
+
+func (h *Handler) cmdZRange(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 3 {
+		conn.WriteError("ERR wrong number of arguments for 'zrange' command")
+		return
+	}
+	start, err := strconv.ParseInt(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+	stop, err := strconv.ParseInt(bytes.BytesToString(args[2]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR value is not an integer or out of range")
+		return
+	}
+	values, err := h.engine.ZRange(ctx, bytes.BytesToString(args[0]), start, stop)
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteArray(len(values))
+	for _, value := range values {
+		conn.WriteBulkString(value)
+	}
+}
+
+func (h *Handler) cmdZScore(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'zscore' command")
+		return
+	}
+	score, err := h.engine.ZScore(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteBulkString(strconv.FormatFloat(score, 'f', -1, 64))
+}
+
+func (h *Handler) cmdZRank(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'zrank' command")
+		return
+	}
+	rank, err := h.engine.ZRank(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(rank)
+}
+
+func (h *Handler) cmdZCard(ctx context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'zcard' command")
+		return
+	}
+	count, err := h.engine.ZCard(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(count)
+}
+
 func (h *Handler) cmdIncr(ctx context.Context, conn redcon.Conn, args [][]byte) {
 	if len(args) != 1 {
 		conn.WriteError("ERR wrong number of arguments for 'incr' command")
@@ -459,10 +962,73 @@ func (h *Handler) cmdIncr(ctx context.Context, conn redcon.Conn, args [][]byte) 
 
 	val, err := h.engine.Incr(ctx, bytes.BytesToString(args[0]))
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteInt64(val)
+}
+
+func (h *Handler) writeDataError(conn redcon.Conn, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, pkgerrors.ErrWrongType) {
+		WriteWrongType(conn)
+		return
+	}
+	if errors.Is(err, pkgerrors.ErrKeyNotFound) {
+		conn.WriteNull()
+		return
+	}
+	conn.WriteError("ERR " + err.Error())
+}
+
+func (h *Handler) cmdPushList(ctx context.Context, conn redcon.Conn, args [][]byte, left bool) {
+	if len(args) < 2 {
+		conn.WriteError("ERR wrong number of arguments for list push command")
+		return
+	}
+	values := make([]interface{}, 0, len(args)-1)
+	for _, arg := range args[1:] {
+		values = append(values, bytes.BytesToString(arg))
+	}
+
+	var (
+		length int64
+		err    error
+	)
+	if left {
+		length, err = h.engine.LPush(ctx, bytes.BytesToString(args[0]), values...)
+	} else {
+		length, err = h.engine.RPush(ctx, bytes.BytesToString(args[0]), values...)
+	}
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteInt64(length)
+}
+
+func (h *Handler) cmdPopList(ctx context.Context, conn redcon.Conn, args [][]byte, left bool) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for list pop command")
+		return
+	}
+
+	var (
+		value string
+		err   error
+	)
+	if left {
+		value, err = h.engine.LPop(ctx, bytes.BytesToString(args[0]))
+	} else {
+		value, err = h.engine.RPop(ctx, bytes.BytesToString(args[0]))
+	}
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	conn.WriteBulkString(value)
 }
 
 func (h *Handler) cmdIncrBy(ctx context.Context, conn redcon.Conn, args [][]byte) {
@@ -479,7 +1045,7 @@ func (h *Handler) cmdIncrBy(ctx context.Context, conn redcon.Conn, args [][]byte
 
 	val, err := h.engine.IncrBy(ctx, bytes.BytesToString(args[0]), delta)
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteInt64(val)
@@ -493,7 +1059,7 @@ func (h *Handler) cmdDecr(ctx context.Context, conn redcon.Conn, args [][]byte) 
 
 	val, err := h.engine.Decr(ctx, bytes.BytesToString(args[0]))
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteInt64(val)
@@ -513,7 +1079,7 @@ func (h *Handler) cmdDecrBy(ctx context.Context, conn redcon.Conn, args [][]byte
 
 	val, err := h.engine.DecrBy(ctx, bytes.BytesToString(args[0]), delta)
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteInt64(val)
@@ -527,7 +1093,7 @@ func (h *Handler) cmdAppend(ctx context.Context, conn redcon.Conn, args [][]byte
 
 	length, err := h.engine.Append(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
+		h.writeDataError(conn, err)
 		return
 	}
 	conn.WriteInt64(length)
@@ -539,7 +1105,11 @@ func (h *Handler) cmdStrlen(ctx context.Context, conn redcon.Conn, args [][]byte
 		return
 	}
 
-	length, _ := h.engine.Strlen(ctx, bytes.BytesToString(args[0]))
+	length, err := h.engine.Strlen(ctx, bytes.BytesToString(args[0]))
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	conn.WriteInt64(length)
 }
 
@@ -550,7 +1120,11 @@ func (h *Handler) cmdGetSet(ctx context.Context, conn redcon.Conn, args [][]byte
 	}
 
 	old, err := h.engine.GetSet(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
-	if err != nil || old == "" {
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
+	if old == "" {
 		conn.WriteNull()
 		return
 	}
@@ -799,8 +1373,8 @@ func (h *Handler) cmdRestore(ctx context.Context, conn redcon.Conn, args [][]byt
 	}
 
 	if !replace {
-		_, err := h.engine.GetBytes(ctx, key)
-		if err == nil {
+		exists, err := h.engine.Exists(ctx, key)
+		if err == nil && exists > 0 {
 			conn.WriteError("BUSYKEY Target key name already exists.")
 			return
 		}
@@ -811,20 +1385,18 @@ func (h *Handler) cmdRestore(ctx context.Context, conn redcon.Conn, args [][]byt
 		return
 	}
 
-	valueType := serialized[0]
+	valueType := engine.ValueType(serialized[0])
 	valueData := serialized[1:]
-
-	if valueType != 0 {
-		conn.WriteError("ERR unsupported value type in serialized data")
-		return
-	}
 
 	var ttl time.Duration
 	if ttlMs > 0 {
 		ttl = time.Duration(ttlMs) * time.Millisecond
 	}
 
-	h.engine.Set(ctx, key, bytes.BytesToString(valueData), ttl)
+	if err := h.engine.RestoreEntry(ctx, key, valueType, valueData, ttl); err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
 	conn.WriteString("OK")
 }
 
@@ -918,20 +1490,11 @@ func (h *Handler) cmdMigrate(ctx context.Context, conn redcon.Conn, args [][]byt
 			}
 		}
 
-		var valueBytes []byte
-		switch v := entry.Value.(type) {
-		case []byte:
-			valueBytes = v
-		case string:
-			valueBytes = []byte(v)
-		default:
+		serialized, err := memory.SerializeEntryValue(entry)
+		if err != nil {
 			conn.WriteError("ERR unsupported value type for migration")
 			return
 		}
-
-		serialized := make([]byte, 1+len(valueBytes))
-		serialized[0] = 0
-		copy(serialized[1:], valueBytes)
 
 		items = append(items, migrateItem{
 			key:        migrateKey,

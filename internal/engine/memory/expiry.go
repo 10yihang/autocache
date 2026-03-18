@@ -12,15 +12,19 @@ const (
 )
 
 type ExpiryManager struct {
-	cache  *ShardedCache
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	cache          *ShardedCache
+	objects        *Dict
+	onObjectDelete func(string)
+	stopCh         chan struct{}
+	wg             sync.WaitGroup
 }
 
-func NewExpiryManager(cache *ShardedCache) *ExpiryManager {
+func NewExpiryManager(cache *ShardedCache, objects *Dict, onObjectDelete func(string)) *ExpiryManager {
 	return &ExpiryManager{
-		cache:  cache,
-		stopCh: make(chan struct{}),
+		cache:          cache,
+		objects:        objects,
+		onObjectDelete: onObjectDelete,
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -54,7 +58,7 @@ func (m *ExpiryManager) activeExpireCycle() {
 	for {
 		keys := m.cache.RandomKeys(expireScanCount)
 		if len(keys) == 0 {
-			return
+			break
 		}
 
 		expired := 0
@@ -69,6 +73,40 @@ func (m *ExpiryManager) activeExpireCycle() {
 			if ttl <= 0 {
 				m.cache.Delete(key)
 				expired++
+			}
+		}
+
+		if float64(expired)/float64(len(keys)) < expireThreshold {
+			break
+		}
+	}
+
+	if m.objects == nil {
+		return
+	}
+
+	for {
+		keys := m.objects.RandomKeys(expireScanCount)
+		if len(keys) == 0 {
+			return
+		}
+
+		expired := 0
+		for _, key := range keys {
+			ttl, ok := m.objects.TTL(key)
+			if !ok {
+				continue
+			}
+			if ttl == -1 {
+				continue
+			}
+			if ttl <= 0 {
+				if m.objects.Del(key) > 0 {
+					expired++
+					if m.onObjectDelete != nil {
+						m.onObjectDelete(key)
+					}
+				}
 			}
 		}
 

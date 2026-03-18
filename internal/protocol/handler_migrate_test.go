@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -205,6 +206,94 @@ func TestMigrate_WithCopy(t *testing.T) {
 	}
 	if string(buf[:n]) != "$3\r\nbar\r\n" {
 		t.Errorf("GET on target expected $3\\r\\nbar\\r\\n, got %q", string(buf[:n]))
+	}
+}
+
+func TestMigrate_HashWithTTL(t *testing.T) {
+	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceAdapter := NewMemoryStoreAdapter(sourceStore)
+	sourceServer := NewServer(":0", sourceAdapter)
+
+	go func() {
+		_ = sourceServer.Start()
+	}()
+	defer sourceServer.Stop()
+
+	sourceAddr := waitForServer(t, sourceServer, 2*time.Second)
+
+	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetAdapter := NewMemoryStoreAdapter(targetStore)
+	targetServer := NewServer(":0", targetAdapter)
+
+	go func() {
+		_ = targetServer.Start()
+	}()
+	defer targetServer.Stop()
+
+	targetAddr := waitForServer(t, targetServer, 2*time.Second)
+
+	ctx := context.Background()
+	if _, err := sourceStore.HSet(ctx, "hash", "field", "value"); err != nil {
+		t.Fatalf("HSet failed: %v", err)
+	}
+	if ok, err := sourceStore.Expire(ctx, "hash", 2*time.Second); err != nil || !ok {
+		t.Fatalf("Expire failed: ok=%v err=%v", ok, err)
+	}
+
+	sourceConn, err := net.Dial("tcp", sourceAddr)
+	if err != nil {
+		t.Fatalf("failed to connect to source: %v", err)
+	}
+	defer sourceConn.Close()
+
+	targetHost, targetPort, _ := net.SplitHostPort(targetAddr)
+	migrateCmd := fmt.Sprintf("*6\r\n$7\r\nMIGRATE\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$4\r\nhash\r\n$1\r\n0\r\n$4\r\n5000\r\n",
+		len(targetHost), targetHost, len(targetPort), targetPort)
+
+	if _, err := sourceConn.Write([]byte(migrateCmd)); err != nil {
+		t.Fatalf("failed to write MIGRATE: %v", err)
+	}
+
+	buf := make([]byte, 1024)
+	sourceConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := sourceConn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read MIGRATE response: %v", err)
+	}
+	if string(buf[:n]) != "+OK\r\n" {
+		t.Fatalf("MIGRATE expected +OK, got %q", string(buf[:n]))
+	}
+
+	targetConn, err := net.Dial("tcp", targetAddr)
+	if err != nil {
+		t.Fatalf("failed to connect to target: %v", err)
+	}
+	defer targetConn.Close()
+
+	hgetCmd := "*3\r\n$4\r\nHGET\r\n$4\r\nhash\r\n$5\r\nfield\r\n"
+	if _, err := targetConn.Write([]byte(hgetCmd)); err != nil {
+		t.Fatalf("failed to write HGET: %v", err)
+	}
+	targetConn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err = targetConn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read HGET response: %v", err)
+	}
+	if string(buf[:n]) != "$5\r\nvalue\r\n" {
+		t.Fatalf("HGET on target expected value, got %q", string(buf[:n]))
+	}
+
+	pttlCmd := "*2\r\n$4\r\nPTTL\r\n$4\r\nhash\r\n"
+	if _, err := targetConn.Write([]byte(pttlCmd)); err != nil {
+		t.Fatalf("failed to write PTTL: %v", err)
+	}
+	targetConn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err = targetConn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read PTTL response: %v", err)
+	}
+	if n == 0 || buf[0] != ':' {
+		t.Fatalf("PTTL expected integer response, got %q", string(buf[:n]))
 	}
 }
 

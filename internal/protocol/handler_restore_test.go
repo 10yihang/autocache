@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/memory"
 )
 
@@ -274,5 +275,71 @@ func TestRestore_WrongArgs(t *testing.T) {
 	response := string(buf[:n])
 	if response[0] != '-' {
 		t.Errorf("RESTORE with wrong args expected error, got %q", response)
+	}
+}
+
+func TestRestore_HashWithTTL(t *testing.T) {
+	store := memory.NewStore(memory.DefaultConfig())
+	adapter := NewMemoryStoreAdapter(store)
+	server := NewServer(":0", adapter)
+
+	go func() {
+		_ = server.Start()
+	}()
+	defer server.Stop()
+
+	addr := waitForServer(t, server, 2*time.Second)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	entry := &engine.Entry{Type: engine.TypeHash, Value: map[string]string{"field": "value"}}
+	serialized, err := memory.SerializeEntryValue(entry)
+	if err != nil {
+		t.Fatalf("SerializeEntryValue failed: %v", err)
+	}
+
+	cmd := fmt.Sprintf("*4\r\n$7\r\nRESTORE\r\n$4\r\nhash\r\n$3\r\n500\r\n$%d\r\n%s\r\n", len(serialized), serialized)
+	if _, err := conn.Write([]byte(cmd)); err != nil {
+		t.Fatalf("failed to write RESTORE: %v", err)
+	}
+
+	buf := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read RESTORE response: %v", err)
+	}
+	if string(buf[:n]) != "+OK\r\n" {
+		t.Fatalf("RESTORE expected +OK, got %q", string(buf[:n]))
+	}
+
+	hgetCmd := "*3\r\n$4\r\nHGET\r\n$4\r\nhash\r\n$5\r\nfield\r\n"
+	if _, err := conn.Write([]byte(hgetCmd)); err != nil {
+		t.Fatalf("failed to write HGET: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read HGET response: %v", err)
+	}
+	if string(buf[:n]) != "$5\r\nvalue\r\n" {
+		t.Fatalf("HGET expected value, got %q", string(buf[:n]))
+	}
+
+	pttlCmd := "*2\r\n$4\r\nPTTL\r\n$4\r\nhash\r\n"
+	if _, err := conn.Write([]byte(pttlCmd)); err != nil {
+		t.Fatalf("failed to write PTTL: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read PTTL response: %v", err)
+	}
+	if n == 0 || buf[0] != ':' {
+		t.Fatalf("PTTL expected integer response, got %q", string(buf[:n]))
 	}
 }

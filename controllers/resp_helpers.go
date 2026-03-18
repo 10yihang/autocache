@@ -10,6 +10,79 @@ import (
 	"time"
 )
 
+func getClusterHealthAtAddr(ctx context.Context, addr string) (*clusterHealth, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if err := setConnDeadline(ctx, conn, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write([]byte("*2\r\n$7\r\nCLUSTER\r\n$4\r\nINFO\r\n")); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := parseRESP(reader)
+	if err != nil {
+		return nil, err
+	}
+	info, ok := resp.(string)
+	if !ok {
+		return nil, fmt.Errorf("unexpected cluster info payload type %T", resp)
+	}
+	health := &clusterHealth{}
+	for _, part := range strings.Split(strings.TrimSpace(info), "\r\n") {
+		fields := strings.SplitN(part, ":", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[0] {
+		case "cluster_state":
+			health.Status = fields[1]
+		case "cluster_known_nodes":
+			health.KnownNodes, _ = strconv.Atoi(fields[1])
+		case "cluster_slots_assigned":
+			health.SlotsAssigned, _ = strconv.Atoi(fields[1])
+		}
+	}
+	return health, nil
+}
+
+func getClusterNodesAtAddr(ctx context.Context, addr string) ([]clusterNode, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if err := setConnDeadline(ctx, conn, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write([]byte("*2\r\n$7\r\nCLUSTER\r\n$5\r\nNODES\r\n")); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := parseRESP(reader)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := resp.(string)
+	if !ok {
+		return nil, fmt.Errorf("unexpected cluster nodes payload type %T", resp)
+	}
+	var nodes []clusterNode
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\r\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		nodes = append(nodes, clusterNode{ID: fields[0], Addr: fields[1], Flags: fields[2]})
+	}
+	return nodes, nil
+}
+
 func sendRESPCommand(ctx context.Context, addr string, command string) error {
 	return sendRESPCommandArgs(ctx, addr, strings.Fields(command)...)
 }

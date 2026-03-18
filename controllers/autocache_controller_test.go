@@ -18,6 +18,226 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+func TestUpdateStatus_RequiresRealClusterHealth(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	replicas := int32(3)
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: replicas, Port: 6379},
+	}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Status: appsv1.StatefulSetStatus{
+			Replicas:      replicas,
+			ReadyReplicas: replicas,
+		},
+	}
+	labels := ac.GetSelectorLabels()
+	pods := []*corev1.Pod{
+		makeReadyPod("test-cache-0", "default", "10.0.0.1", labels),
+		makeReadyPod("test-cache-1", "default", "10.0.0.2", labels),
+		makeReadyPod("test-cache-2", "default", "10.0.0.3", labels),
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, sts, pods[0], pods[1], pods[2]).WithStatusSubresource(ac).Build()
+	r := &AutoCacheReconciler{
+		Client: cl,
+		Scheme: s,
+		getClusterHealthFn: func(context.Context, string) (*clusterHealth, error) {
+			return &clusterHealth{Status: "fail", KnownNodes: 1, SlotsAssigned: 0}, nil
+		},
+	}
+
+	if err := r.updateStatus(context.Background(), ac); err != nil {
+		t.Fatalf("updateStatus failed: %v", err)
+	}
+
+	updated := &cachev1alpha1.AutoCache{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-cache", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get updated autocache: %v", err)
+	}
+	if updated.Status.Phase == cachev1alpha1.ClusterPhaseRunning {
+		t.Fatalf("phase = %s, want not running when cluster health is degraded", updated.Status.Phase)
+	}
+	if updated.Status.ClusterStatus == "ok" {
+		t.Fatalf("clusterStatus = %q, want non-ok when cluster health is degraded", updated.Status.ClusterStatus)
+	}
+}
+
+func TestUpdateStatus_RejectsExtraStaleNodes(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	replicas := int32(3)
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: replicas, Port: 6379},
+	}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Status: appsv1.StatefulSetStatus{
+			Replicas:      replicas,
+			ReadyReplicas: replicas,
+		},
+	}
+	labels := ac.GetSelectorLabels()
+	pods := []*corev1.Pod{
+		makeReadyPod("test-cache-0", "default", "10.0.0.1", labels),
+		makeReadyPod("test-cache-1", "default", "10.0.0.2", labels),
+		makeReadyPod("test-cache-2", "default", "10.0.0.3", labels),
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, sts, pods[0], pods[1], pods[2]).WithStatusSubresource(ac).Build()
+	r := &AutoCacheReconciler{
+		Client: cl,
+		Scheme: s,
+		getClusterHealthFn: func(context.Context, string) (*clusterHealth, error) {
+			return &clusterHealth{Status: "ok", KnownNodes: 4, SlotsAssigned: 16384}, nil
+		},
+	}
+
+	if err := r.updateStatus(context.Background(), ac); err != nil {
+		t.Fatalf("updateStatus failed: %v", err)
+	}
+	updated := &cachev1alpha1.AutoCache{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-cache", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get updated autocache: %v", err)
+	}
+	if updated.Status.Phase == cachev1alpha1.ClusterPhaseRunning {
+		t.Fatalf("phase = %s, want not running when cluster has stale extra nodes", updated.Status.Phase)
+	}
+}
+
+func TestInitializeCluster_UsesObservedHealthBeforeSettingSlotsAssigned(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: 3, Port: 6379},
+	}
+	labels := ac.GetSelectorLabels()
+	pods := []*corev1.Pod{
+		makeReadyPod("test-cache-0", "default", "10.0.0.1", labels),
+		makeReadyPod("test-cache-1", "default", "10.0.0.2", labels),
+		makeReadyPod("test-cache-2", "default", "10.0.0.3", labels),
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, pods[0], pods[1], pods[2]).WithStatusSubresource(ac).Build()
+	r := &AutoCacheReconciler{
+		Client:        cl,
+		Scheme:        s,
+		sendCommandFn: func(context.Context, string, string) error { return nil },
+		getClusterHealthFn: func(context.Context, string) (*clusterHealth, error) {
+			return &clusterHealth{Status: "fail", KnownNodes: 1, SlotsAssigned: 0}, nil
+		},
+	}
+
+	if err := r.initializeCluster(context.Background(), ac); err != nil {
+		t.Fatalf("initializeCluster failed: %v", err)
+	}
+	updated := &cachev1alpha1.AutoCache{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "test-cache", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("get updated autocache: %v", err)
+	}
+	if updated.Status.SlotsAssigned != 0 {
+		t.Fatalf("slotsAssigned = %d, want 0 until real cluster health confirms slots", updated.Status.SlotsAssigned)
+	}
+}
+
+func TestInitializeCluster_ForgetsStaleFailedNodes(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: 3, Port: 6379},
+	}
+	labels := ac.GetSelectorLabels()
+	pods := []*corev1.Pod{
+		makeReadyPod("test-cache-0", "default", "10.0.0.1", labels),
+		makeReadyPod("test-cache-1", "default", "10.0.0.2", labels),
+		makeReadyPod("test-cache-2", "default", "10.0.0.3", labels),
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, pods[0], pods[1], pods[2]).WithStatusSubresource(ac).Build()
+	var commands []string
+	r := &AutoCacheReconciler{
+		Client: cl,
+		Scheme: s,
+		sendCommandFn: func(_ context.Context, addr string, command string) error {
+			commands = append(commands, addr+"|"+command)
+			return nil
+		},
+		getClusterNodesFn: func(context.Context, string) ([]clusterNode, error) {
+			return []clusterNode{
+				{ID: "stale-node", Addr: "10.0.0.99:6379@16379", Flags: "master,fail?"},
+			}, nil
+		},
+		getClusterHealthFn: func(context.Context, string) (*clusterHealth, error) {
+			return &clusterHealth{Status: "ok", KnownNodes: 3, SlotsAssigned: 16384}, nil
+		},
+	}
+
+	if err := r.initializeCluster(context.Background(), ac); err != nil {
+		t.Fatalf("initializeCluster failed: %v", err)
+	}
+	forgetCount := 0
+	for _, cmd := range commands {
+		if strings.Contains(cmd, "CLUSTER FORGET stale-node") {
+			forgetCount++
+		}
+	}
+	if forgetCount != 3 {
+		t.Fatalf("forgetCount = %d, want 3", forgetCount)
+	}
+}
+
+func TestReconcile_InitializesClusterWhenPodsReadyButHealthDegraded(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	replicas := int32(3)
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default", Finalizers: []string{finalizerName}},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: replicas, Port: 6379, Image: "autocache:latest"},
+		Status:     cachev1alpha1.AutoCacheStatus{Phase: cachev1alpha1.ClusterPhasePending, ObservedGeneration: 1},
+	}
+	sts := (&AutoCacheReconciler{Scheme: s}).buildStatefulSet(ac)
+	sts.Status.Replicas = replicas
+	sts.Status.ReadyReplicas = replicas
+	labels := ac.GetSelectorLabels()
+	pods := []*corev1.Pod{
+		makeReadyPod("test-cache-0", "default", "10.0.0.1", labels),
+		makeReadyPod("test-cache-1", "default", "10.0.0.2", labels),
+		makeReadyPod("test-cache-2", "default", "10.0.0.3", labels),
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, sts, pods[0], pods[1], pods[2]).WithStatusSubresource(ac).Build()
+	called := 0
+	r := &AutoCacheReconciler{
+		Client: cl,
+		Scheme: s,
+		sendCommandFn: func(context.Context, string, string) error {
+			called++
+			return nil
+		},
+		getClusterHealthFn: func(context.Context, string) (*clusterHealth, error) {
+			return &clusterHealth{Status: "fail", KnownNodes: 1, SlotsAssigned: 0}, nil
+		},
+	}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-cache", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if called == 0 {
+		t.Fatal("expected reconcile to trigger cluster initialization commands when pods are ready but health is degraded")
+	}
+}
+
 func TestAutoCacheReconciler_Reconcile(t *testing.T) {
 	// Register types
 	s := scheme.Scheme

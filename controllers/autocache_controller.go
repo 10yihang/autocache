@@ -52,8 +52,22 @@ type AutoCacheReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	sendCommandFn     func(ctx context.Context, addr string, command string) error
-	newScaleManagerFn func(client.Client) *ScaleManager
+	sendCommandFn      func(ctx context.Context, addr string, command string) error
+	newScaleManagerFn  func(client.Client) *ScaleManager
+	getClusterHealthFn func(ctx context.Context, addr string) (*clusterHealth, error)
+	getClusterNodesFn  func(ctx context.Context, addr string) ([]clusterNode, error)
+}
+
+type clusterHealth struct {
+	Status        string
+	KnownNodes    int
+	SlotsAssigned int
+}
+
+type clusterNode struct {
+	ID    string
+	Addr  string
+	Flags string
 }
 
 // +kubebuilder:rbac:groups=cache.autocache.io,resources=autocaches,verbs=get;list;watch;create;update;patch;delete
@@ -141,9 +155,13 @@ func (r *AutoCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Check if cluster needs initialization
-	if ac.Status.Phase == cachev1alpha1.ClusterPhaseRunning && ac.Status.SlotsAssigned == 0 {
+	if ac.Status.ReadyReplicas == ac.Spec.Replicas && (ac.Status.SlotsAssigned == 0 || ac.Status.ClusterStatus != "ok") {
 		if err := r.initializeCluster(ctx, ac); err != nil {
 			logger.Error(err, "Failed to initialize cluster")
+			return ctrl.Result{RequeueAfter: requeueAfterError}, err
+		}
+		if err := r.updateStatus(ctx, ac); err != nil {
+			logger.Error(err, "Failed to refresh status after initialization")
 			return ctrl.Result{RequeueAfter: requeueAfterError}, err
 		}
 	}
@@ -428,6 +446,10 @@ func (r *AutoCacheReconciler) initializeCluster(ctx context.Context, ac *cachev1
 	if r.sendCommandFn != nil {
 		sendCommand = r.sendCommandFn
 	}
+	nodesFn := r.getClusterNodesFn
+	if nodesFn == nil {
+		nodesFn = getClusterNodesAtAddr
+	}
 
 	const (
 		totalSlots         = 16384
@@ -436,6 +458,33 @@ func (r *AutoCacheReconciler) initializeCluster(ctx context.Context, ac *cachev1
 	)
 
 	hadErrors := false
+
+	readyAddrSet := make(map[string]struct{}, len(readyPods))
+	for _, pod := range readyPods {
+		readyAddrSet[fmt.Sprintf("%s:%d", pod.Status.PodIP, port)] = struct{}{}
+	}
+
+	seedNodes, err := nodesFn(ctx, seedAddr)
+	if err == nil {
+		for _, node := range seedNodes {
+			if !strings.Contains(node.Flags, "fail") && !strings.Contains(node.Flags, "disconnected") {
+				continue
+			}
+			addr := strings.Split(node.Addr, "@")[0]
+			if _, ok := readyAddrSet[addr]; ok {
+				continue
+			}
+			for _, pod := range readyPods {
+				podAddr := fmt.Sprintf("%s:%d", pod.Status.PodIP, port)
+				cmdCtx, cancel := context.WithTimeout(ctx, commandTimeoutSecs)
+				err := sendCommand(cmdCtx, podAddr, fmt.Sprintf("CLUSTER FORGET %s", node.ID))
+				cancel()
+				if err != nil {
+					logger.Info("Failed to forget stale cluster node", "addr", podAddr, "nodeID", node.ID, "error", err)
+				}
+			}
+		}
+	}
 
 	for i := 1; i < len(readyPods); i++ {
 		pod := readyPods[i]
@@ -492,8 +541,27 @@ func (r *AutoCacheReconciler) initializeCluster(ctx context.Context, ac *cachev1
 		return nil
 	}
 
-	if ac.Status.SlotsAssigned != int32(totalSlots) {
-		ac.Status.SlotsAssigned = int32(totalSlots)
+	healthFn := r.getClusterHealthFn
+	if healthFn == nil {
+		healthFn = getClusterHealthAtAddr
+	}
+	health, err := healthFn(ctx, seedAddr)
+	if err != nil {
+		logger.Error(err, "Failed to verify cluster health after initialization")
+		return nil
+	}
+	if health.Status != "ok" || health.KnownNodes < len(readyPods) || health.SlotsAssigned == 0 {
+		logger.Info("Cluster initialization not yet reflected in runtime state; will retry",
+			"status", health.Status,
+			"knownNodes", health.KnownNodes,
+			"slotsAssigned", health.SlotsAssigned)
+		return nil
+	}
+
+	if ac.Status.SlotsAssigned != int32(health.SlotsAssigned) {
+		ac.Status.SlotsAssigned = int32(health.SlotsAssigned)
+		ac.Status.ClusterStatus = health.Status
+		ac.Status.Phase = cachev1alpha1.ClusterPhaseRunning
 		if err := r.Status().Update(ctx, ac); err != nil {
 			return err
 		}

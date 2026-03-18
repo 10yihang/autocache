@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-
+	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/protocol"
 )
 
@@ -20,6 +20,10 @@ type SlotProvider interface {
 	GetMigratingSlots() map[uint16]MigrationInfo
 	// GetNode returns node address by ID.
 	GetNode(nodeID string) (addr string, ok bool)
+}
+
+type slotMigrationFinalizer interface {
+	FinishMigration(slot uint16, newNodeID string)
 }
 
 // MigrationInfo contains information about a slot being migrated.
@@ -125,6 +129,9 @@ func (w *Worker) migrateSlotKeys(slot uint16, info MigrationInfo) error {
 	}
 
 	if len(keys) == 0 {
+		if finalizer, ok := w.provider.(slotMigrationFinalizer); ok && info.TargetNodeID != "" {
+			finalizer.FinishMigration(slot, info.TargetNodeID)
+		}
 		return nil
 	}
 
@@ -170,19 +177,10 @@ func (w *Worker) migrateKey(ctx context.Context, key, targetAddr string) error {
 		}
 	}
 
-	var valueBytes []byte
-	switch v := entry.Value.(type) {
-	case []byte:
-		valueBytes = v
-	case string:
-		valueBytes = []byte(v)
-	default:
-		return fmt.Errorf("unsupported value type: %T", entry.Value)
+	serialized, err := memory.SerializeEntryValue(entry)
+	if err != nil {
+		return fmt.Errorf("serialize entry: %w", err)
 	}
-
-	serialized := make([]byte, 1+len(valueBytes))
-	serialized[0] = 0
-	copy(serialized[1:], valueBytes)
 
 	conn, err := net.DialTimeout("tcp", targetAddr, w.timeout)
 	if err != nil {

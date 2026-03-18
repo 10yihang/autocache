@@ -17,12 +17,14 @@ type mockSlotProvider struct {
 	mu             sync.RWMutex
 	migratingSlots map[uint16]MigrationInfo
 	nodes          map[string]string
+	finished       map[uint16]string
 }
 
 func newMockSlotProvider() *mockSlotProvider {
 	return &mockSlotProvider{
 		migratingSlots: make(map[uint16]MigrationInfo),
 		nodes:          make(map[string]string),
+		finished:       make(map[uint16]string),
 	}
 }
 
@@ -59,6 +61,13 @@ func (m *mockSlotProvider) AddNode(nodeID, addr string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nodes[nodeID] = addr
+}
+
+func (m *mockSlotProvider) FinishMigration(slot uint16, newNodeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.finished[slot] = newNodeID
+	delete(m.migratingSlots, slot)
 }
 
 func TestWorker_StartStop(t *testing.T) {
@@ -204,6 +213,85 @@ func TestWorker_MigrateKeyWithTTL(t *testing.T) {
 	}
 	if ttl <= 0 || ttl > 10*time.Second {
 		t.Errorf("expected TTL around 10s, got %v", ttl)
+	}
+}
+
+func TestWorker_MigrateHashKey(t *testing.T) {
+	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
+	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
+
+	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
+	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
+	targetServer := protocol.NewServer(":0", targetAdapter)
+
+	go func() { _ = targetServer.Start() }()
+	defer targetServer.Stop()
+
+	targetAddr := waitForServer(t, targetServer, 2*time.Second)
+
+	ctx := context.Background()
+	if _, err := sourceAdapter.HSet(ctx, "hash", "field", "value"); err != nil {
+		t.Fatalf("HSet failed: %v", err)
+	}
+
+	provider := newMockSlotProvider()
+	provider.SetMigrating(getKeySlot("hash"), MigrationInfo{TargetAddr: targetAddr})
+
+	worker := NewWorker(sourceAdapter, provider, &Config{Interval: 10 * time.Millisecond, Timeout: 5 * time.Second, BatchSize: 100})
+	worker.Start()
+	time.Sleep(200 * time.Millisecond)
+	worker.Stop()
+
+	if _, err := sourceAdapter.HGet(ctx, "hash", "field"); err == nil {
+		t.Fatal("expected hash to be deleted from source")
+	}
+	value, err := targetAdapter.HGet(ctx, "hash", "field")
+	if err != nil {
+		t.Fatalf("expected hash field on target: %v", err)
+	}
+	if value != "value" {
+		t.Fatalf("HGet returned %q, want value", value)
+	}
+}
+
+func TestWorker_FinalizesSlotAfterMigration(t *testing.T) {
+	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
+	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
+
+	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
+	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
+	targetServer := protocol.NewServer(":0", targetAdapter)
+
+	go func() { _ = targetServer.Start() }()
+	defer targetServer.Stop()
+
+	targetAddr := waitForServer(t, targetServer, 2*time.Second)
+
+	ctx := context.Background()
+	if err := sourceAdapter.Set(ctx, "foo", "bar", 0); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	slot := getKeySlot("foo")
+	provider := newMockSlotProvider()
+	provider.SetMigrating(slot, MigrationInfo{TargetNodeID: "target-node", TargetAddr: targetAddr})
+
+	worker := NewWorker(sourceAdapter, provider, &Config{Interval: 10 * time.Millisecond, Timeout: 5 * time.Second, BatchSize: 100})
+	worker.Start()
+	time.Sleep(300 * time.Millisecond)
+	worker.Stop()
+
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	if got := provider.finished[slot]; got != "target-node" {
+		t.Fatalf("finished migration target = %q, want %q", got, "target-node")
+	}
+	if _, ok := provider.migratingSlots[slot]; ok {
+		t.Fatal("slot should be cleared from migrating set after finalization")
 	}
 }
 

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/10yihang/autocache/internal/engine"
+	"github.com/10yihang/autocache/internal/engine/memory"
 )
 
 type MigrationEngine interface {
@@ -195,19 +195,10 @@ func (w *Worker) doMigrate(ctx context.Context, key string, targetAddr string, r
 		}
 	}
 
-	var valueBytes []byte
-	switch v := entry.Value.(type) {
-	case []byte:
-		valueBytes = v
-	case string:
-		valueBytes = []byte(v)
-	default:
-		return fmt.Errorf("unsupported value type")
+	serialized, err := memory.SerializeEntryValue(entry)
+	if err != nil {
+		return fmt.Errorf("serialize entry: %w", err)
 	}
-
-	serialized := make([]byte, 1+len(valueBytes))
-	serialized[0] = 0
-	copy(serialized[1:], valueBytes)
 
 	conn, err := net.DialTimeout("tcp", targetAddr, w.timeout)
 	if err != nil {

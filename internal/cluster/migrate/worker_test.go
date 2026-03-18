@@ -158,3 +158,44 @@ func TestWorker_GetProgress(t *testing.T) {
 		t.Errorf("expected nil progress for non-existent slot, got %v", progress)
 	}
 }
+
+func TestWorker_MigrateSlot_HashKey(t *testing.T) {
+	sourceStore := memory.NewStore(memory.DefaultConfig())
+	sourceStore.SetSlotFunc(hash.KeySlot)
+	sourceAdapter := protocol.NewMemoryStoreAdapter(sourceStore)
+	sourceServer := protocol.NewServer(":0", sourceAdapter)
+
+	go func() { _ = sourceServer.Start() }()
+	defer sourceServer.Stop()
+
+	targetStore := memory.NewStore(memory.DefaultConfig())
+	targetStore.SetSlotFunc(hash.KeySlot)
+	targetAdapter := protocol.NewMemoryStoreAdapter(targetStore)
+	targetServer := protocol.NewServer(":0", targetAdapter)
+
+	go func() { _ = targetServer.Start() }()
+	defer targetServer.Stop()
+
+	targetAddr := waitForServer(t, targetServer, 2*time.Second)
+
+	ctx := context.Background()
+	if _, err := sourceAdapter.HSet(ctx, "{user}hash", "field", "value"); err != nil {
+		t.Fatalf("HSet failed: %v", err)
+	}
+
+	worker := NewWorker(sourceAdapter)
+	if err := worker.MigrateSlot(ctx, hash.KeySlot("{user}hash"), targetAddr, false); err != nil {
+		t.Fatalf("MigrateSlot failed: %v", err)
+	}
+
+	if _, err := sourceAdapter.HGet(ctx, "{user}hash", "field"); err == nil {
+		t.Fatal("expected hash to be removed from source")
+	}
+	value, err := targetAdapter.HGet(ctx, "{user}hash", "field")
+	if err != nil {
+		t.Fatalf("expected hash field on target: %v", err)
+	}
+	if value != "value" {
+		t.Fatalf("HGet returned %q, want value", value)
+	}
+}

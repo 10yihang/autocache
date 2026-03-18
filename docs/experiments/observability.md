@@ -8,7 +8,7 @@ Verify that AutoCache exposes actionable runtime metrics and deployable monitori
 
 - Date:
 - Commit/branch:
-- Metrics address:
+- Metrics address: `:9121`
 - Helm release:
 
 ## Commands
@@ -16,7 +16,7 @@ Verify that AutoCache exposes actionable runtime metrics and deployable monitori
 ```bash
 go test -v ./internal/protocol/...
 helm template autocache ./deploy/helm/autocache --set monitoring.serviceMonitor.enabled=true
-curl http://127.0.0.1:9090/metrics
+curl http://127.0.0.1:9121/metrics
 ```
 
 ## Metrics Checklist
@@ -37,5 +37,12 @@ curl http://127.0.0.1:9090/metrics
 ## Evidence
 
 - `/metrics` excerpt:
-- Helm render excerpt:
-- Dashboard screenshot path:
+
+```text
+autocache_commands_total
+autocache_command_duration_seconds
+autocache_connections_total
+```
+
+- Helm render excerpt: `helm template autocache ./deploy/helm/autocache --set monitoring.serviceMonitor.enabled=true` succeeded and rendered a `ServiceMonitor` selecting `cache.autocache.io/metrics: "true"`
+- Dashboard screenshot path: not captured in CLI session

@@ -1,20 +1,16 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+source "$(dirname "$0")/lib/bench-common.sh"
 
-CLUSTER_NAME=$(grep -m1 'name:' config/samples/cache_v1alpha1_autocache.yaml | awk '{print $2}')
-NAMESPACE="default"
-REQUESTS=${1:-100000}
-CLIENTS=${2:-50}
+CLUSTER_NAME=$(sample_cluster_name)
+NAMESPACE=${NAMESPACE:-default}
+REQUESTS=${1:-$(default_requests)}
+CLIENTS=${2:-$(default_clients)}
 
 echo -e "${GREEN}=== AutoCache Multi-Node Cluster Benchmark ===${NC}"
 echo "Cluster: ${CLUSTER_NAME}"
-echo "Requests: ${REQUESTS}"
-echo "Clients: ${CLIENTS}"
+print_bench_config "${REQUESTS}" "${CLIENTS}"
 echo ""
 
 PODS=$(kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=autocache -o jsonpath='{.items[*].metadata.name}')
@@ -39,54 +35,40 @@ echo -e "${YELLOW}[1/4] Verifying cluster state...${NC}"
 kubectl exec -n ${NAMESPACE} ${POD_ARRAY[0]} -- /autocache -cli CLUSTER INFO 2>/dev/null | grep -E "cluster_state|cluster_slots_assigned|cluster_known_nodes" | tr -d '$'
 echo ""
 
-kubectl delete pod redis-benchmark -n ${NAMESPACE} --ignore-not-found=true >/dev/null 2>&1
-
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: redis-benchmark
-  namespace: ${NAMESPACE}
-spec:
-  restartPolicy: Never
-  containers:
-  - name: benchmark
-    image: docker.1ms.run/redis:7-alpine
-    command: ["sleep", "3600"]
-EOF
-
 echo -e "${YELLOW}Waiting for benchmark pod...${NC}"
-kubectl wait --for=condition=ready pod/redis-benchmark -n ${NAMESPACE} --timeout=120s
+ensure_benchmark_pod "${NAMESPACE}"
 
 echo ""
 echo -e "${YELLOW}[2/4] Testing individual nodes...${NC}"
 echo "Each node handles keys in its own slot range"
 echo ""
 
-TAGS=("b" "c" "a")
+bench_rps() {
+    local output
+    output=$(run_k8s_benchmark "$@")
+    printf '%s\n' "$output" | tr '\r' '\n' | grep 'requests per second' | tail -1
+}
 
 for i in "${!POD_ARRAY[@]}"; do
     pod=${POD_ARRAY[$i]}
     ip=${POD_IPS[$i]}
-    tag=${TAGS[$i]}
+    tag=$(same_slot_tag "$i")
     
-    echo -e "${GREEN}--- Node $i: ${pod} (${ip}) tag={${tag}} ---${NC}"
+    echo -e "${GREEN}--- Node $i: ${pod} (${ip}) tag=${tag} ---${NC}"
     
     echo -n "  SET: "
-    kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-        -h ${ip} -p 6379 \
+    bench_rps "${NAMESPACE}" "${ip}" \
         -n $((REQUESTS / POD_COUNT)) \
         -c ${CLIENTS} \
         -q \
-        SET "{${tag}}:__rand_int__" __data__ 2>/dev/null | tail -1 || echo "failed"
+        SET "${tag}:__rand_int__" __data__ || echo "failed"
     
     echo -n "  GET: "
-    kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-        -h ${ip} -p 6379 \
+    bench_rps "${NAMESPACE}" "${ip}" \
         -n $((REQUESTS / POD_COUNT)) \
         -c ${CLIENTS} \
         -q \
-        GET "{${tag}}:__rand_int__" 2>/dev/null | tail -1 || echo "failed"
+        GET "${tag}:__rand_int__" || echo "failed"
     echo ""
 done
 
@@ -97,19 +79,16 @@ echo ""
 RESULTS_DIR="/tmp/autocache-bench-$$"
 mkdir -p ${RESULTS_DIR}
 
-TAGS=("b" "c" "a")
-
 PIDS=()
 for i in "${!POD_ARRAY[@]}"; do
     ip=${POD_IPS[$i]}
-    tag=${TAGS[$i]}
+    tag=$(same_slot_tag "$i")
     (
-        result=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-            -h ${ip} -p 6379 \
+        result=$(bench_rps "${NAMESPACE}" "${ip}" \
             -n $((REQUESTS / POD_COUNT)) \
             -c ${CLIENTS} \
             -q \
-            SET "{${tag}}:__rand_int__" __data__ 2>/dev/null | tail -1)
+            SET "${tag}:__rand_int__" __data__)
         echo "$result" > ${RESULTS_DIR}/set_${i}.txt
     ) &
     PIDS+=($!)
@@ -124,7 +103,7 @@ echo "SET results:"
 for i in "${!POD_ARRAY[@]}"; do
     if [ -f "${RESULTS_DIR}/set_${i}.txt" ]; then
         result=$(cat ${RESULTS_DIR}/set_${i}.txt)
-        rps=$(echo "$result" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        rps=$(printf '%s\n' "$result" | extract_rps)
         if [ -n "$rps" ]; then
             total_set_rps=$(echo "$total_set_rps + $rps" | bc 2>/dev/null || echo "$total_set_rps")
         fi
@@ -135,14 +114,13 @@ done
 PIDS=()
 for i in "${!POD_ARRAY[@]}"; do
     ip=${POD_IPS[$i]}
-    tag=${TAGS[$i]}
+    tag=$(same_slot_tag "$i")
     (
-        result=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-            -h ${ip} -p 6379 \
+        result=$(bench_rps "${NAMESPACE}" "${ip}" \
             -n $((REQUESTS / POD_COUNT)) \
             -c ${CLIENTS} \
             -q \
-            GET "{${tag}}:__rand_int__" 2>/dev/null | tail -1)
+            GET "${tag}:__rand_int__")
         echo "$result" > ${RESULTS_DIR}/get_${i}.txt
     ) &
     PIDS+=($!)
@@ -158,7 +136,7 @@ echo "GET results:"
 for i in "${!POD_ARRAY[@]}"; do
     if [ -f "${RESULTS_DIR}/get_${i}.txt" ]; then
         result=$(cat ${RESULTS_DIR}/get_${i}.txt)
-        rps=$(echo "$result" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        rps=$(printf '%s\n' "$result" | extract_rps)
         if [ -n "$rps" ]; then
             total_get_rps=$(echo "$total_get_rps + $rps" | bc 2>/dev/null || echo "$total_get_rps")
         fi
@@ -182,10 +160,10 @@ kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
     -n ${REQUESTS} \
     -c ${CLIENTS} \
     -q \
-    -t ping,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,mset 2>/dev/null || true
+    -t ping,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,mset 2>/dev/null | tr '\r' '\n' || true
 
 echo ""
 echo -e "${YELLOW}Cleaning up...${NC}"
-kubectl delete pod redis-benchmark -n ${NAMESPACE} --ignore-not-found=true >/dev/null 2>&1
+delete_pod_if_exists "${NAMESPACE}" redis-benchmark
 
 echo -e "${GREEN}Done.${NC}"

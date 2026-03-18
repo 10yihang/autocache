@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+source "$(dirname "$0")/lib/bench-common.sh"
 
-REQUESTS=${1:-100000}
-CLIENTS=${2:-50}
-DATA_SIZE=${3:-100}
+REQUESTS=${1:-$(default_requests)}
+CLIENTS=${2:-$(default_clients)}
+DATA_SIZE=${3:-$(default_data_size)}
 
 REDIS_PORT=6380
 AUTOCACHE_PORT=6381
+
+require_cmd redis-benchmark
+require_cmd redis-server
+require_cmd redis-cli
 
 echo -e "${CYAN}${BOLD}"
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║     Native Performance Comparison: AutoCache vs Redis (No K8s)      ║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo "Configuration:"
-echo "  Requests:   ${REQUESTS}"
-echo "  Clients:    ${CLIENTS}"
-echo "  Data size:  ${DATA_SIZE} bytes"
+print_bench_config "${REQUESTS}" "${CLIENTS}" "${DATA_SIZE}"
 echo "  Redis port: ${REDIS_PORT}"
 echo "  AutoCache:  ${AUTOCACHE_PORT}"
 echo ""
@@ -89,9 +85,11 @@ run_bench() {
     local port=$2
     
     echo -e "${GREEN}--- ${name} (localhost:${port}) ---${NC}"
-    redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
-        -t ping,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,mset 2>&1 | \
-        grep -E "PING_INLINE|SET:|GET:|INCR:|LPUSH:|RPUSH:|LPOP:|RPOP:|SADD:|HSET:|MSET"
+    safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
+        -t ping,set,get,incr | grep -E "PING_INLINE|SET:|GET:|INCR:"
+    echo -e "${YELLOW}  Optional extended commands (best effort):${NC}"
+    safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
+        -t lpush,rpush,lpop,rpop,sadd,hset,mset | grep -E "LPUSH:|RPUSH:|LPOP:|RPOP:|SADD:|HSET:|MSET|ERR unknown command" || true
     echo ""
 }
 
@@ -104,26 +102,27 @@ echo ""
 get_rps() {
     local port=$1
     local cmd=$2
-    local key=$3
+    shift 2
+    local output
     
-    if [ -n "$key" ]; then
-        redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -q ${cmd} "${key}" 2>&1 | \
-            tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1
+    if [ "$#" -gt 0 ]; then
+        output=$(safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -q ${cmd} "$@")
     else
-        redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -t ${cmd} -q 2>&1 | \
-            grep -i "${cmd}" | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1
+        output=$(safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -t ${cmd} -q)
     fi
+
+    printf '%s\n' "$output" | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1
 }
 
-REDIS_PING=$(redis-benchmark -p ${REDIS_PORT} -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>&1 | grep PING_INLINE | grep -oE '[0-9]+\.[0-9]+' | head -1)
-REDIS_SET=$(redis-benchmark -p ${REDIS_PORT} -n ${REQUESTS} -c ${CLIENTS} -q SET 'key:__rand_int__' __data__ 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-REDIS_GET=$(redis-benchmark -p ${REDIS_PORT} -n ${REQUESTS} -c ${CLIENTS} -q GET 'key:__rand_int__' 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-REDIS_INCR=$(redis-benchmark -p ${REDIS_PORT} -n ${REQUESTS} -c ${CLIENTS} -q INCR 'counter' 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+REDIS_PING=$(get_rps ${REDIS_PORT} ping)
+REDIS_SET=$(get_rps ${REDIS_PORT} SET 'key:__rand_int__' '__data__')
+REDIS_GET=$(get_rps ${REDIS_PORT} GET 'key:__rand_int__')
+REDIS_INCR=$(get_rps ${REDIS_PORT} INCR 'counter')
 
-AC_PING=$(redis-benchmark -p ${AUTOCACHE_PORT} -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>&1 | grep PING_INLINE | grep -oE '[0-9]+\.[0-9]+' | head -1)
-AC_SET=$(redis-benchmark -p ${AUTOCACHE_PORT} -n ${REQUESTS} -c ${CLIENTS} -q SET 'key:__rand_int__' __data__ 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-AC_GET=$(redis-benchmark -p ${AUTOCACHE_PORT} -n ${REQUESTS} -c ${CLIENTS} -q GET 'key:__rand_int__' 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-AC_INCR=$(redis-benchmark -p ${AUTOCACHE_PORT} -n ${REQUESTS} -c ${CLIENTS} -q INCR 'counter' 2>&1 | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+AC_PING=$(get_rps ${AUTOCACHE_PORT} ping)
+AC_SET=$(get_rps ${AUTOCACHE_PORT} SET 'key:__rand_int__' '__data__')
+AC_GET=$(get_rps ${AUTOCACHE_PORT} GET 'key:__rand_int__')
+AC_INCR=$(get_rps ${AUTOCACHE_PORT} INCR 'counter')
 
 calc_ratio() {
     if [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "0" ]; then
@@ -168,7 +167,11 @@ print_row "INCR" "$REDIS_INCR" "$AC_INCR"
 echo -e "${CYAN}╚═══════════╩═══════════════════╩═══════════════════╩═════════════════════╝${NC}"
 echo ""
 
-AVG_RATIO=$(echo "scale=2; ($(calc_ratio "$REDIS_PING" "$AC_PING") + $(calc_ratio "$REDIS_SET" "$AC_SET") + $(calc_ratio "$REDIS_GET" "$AC_GET") + $(calc_ratio "$REDIS_INCR" "$AC_INCR")) / 4" | bc 2>/dev/null || echo "N/A")
+if [ -n "${REDIS_PING}" ] && [ -n "${AC_PING}" ] && [ -n "${REDIS_SET}" ] && [ -n "${AC_SET}" ] && [ -n "${REDIS_GET}" ] && [ -n "${AC_GET}" ] && [ -n "${REDIS_INCR}" ] && [ -n "${AC_INCR}" ]; then
+    AVG_RATIO=$(echo "scale=2; ($(calc_ratio "$REDIS_PING" "$AC_PING") + $(calc_ratio "$REDIS_SET" "$AC_SET") + $(calc_ratio "$REDIS_GET" "$AC_GET") + $(calc_ratio "$REDIS_INCR" "$AC_INCR")) / 4" | bc 2>/dev/null || echo "N/A")
+else
+    AVG_RATIO="N/A"
+fi
 
 echo -e "${YELLOW}Summary:${NC}"
 echo "  Average performance ratio: ${AVG_RATIO}x of Redis"

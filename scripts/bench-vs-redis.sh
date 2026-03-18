@@ -1,34 +1,28 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+source "$(dirname "$0")/lib/bench-common.sh"
 
-NAMESPACE="default"
-REQUESTS=${1:-50000}
-CLIENTS=${2:-50}
-DATA_SIZE=${3:-100}
+NAMESPACE=${NAMESPACE:-default}
+REQUESTS=${1:-$(default_requests)}
+CLIENTS=${2:-$(default_clients)}
+DATA_SIZE=${3:-$(default_data_size)}
 
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║       AutoCache vs Redis Performance Comparison           ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "Requests: ${REQUESTS}"
-echo "Clients: ${CLIENTS}"  
-echo "Data size: ${DATA_SIZE} bytes"
+print_bench_config "${REQUESTS}" "${CLIENTS}" "${DATA_SIZE}"
 echo ""
 
 cleanup() {
     echo -e "${YELLOW}Cleaning up...${NC}"
-    kubectl delete pod redis-server redis-benchmark -n ${NAMESPACE} --ignore-not-found=true >/dev/null 2>&1
+    delete_pod_if_exists "${NAMESPACE}" redis-server redis-benchmark
 }
 trap cleanup EXIT
 
 echo -e "${YELLOW}[1/5] Deploying Redis server for comparison...${NC}"
-kubectl delete pod redis-server -n ${NAMESPACE} --ignore-not-found=true >/dev/null 2>&1
+delete_pod_if_exists "${NAMESPACE}" redis-server
 sleep 2
 
 cat <<EOF | kubectl apply -f -
@@ -50,29 +44,14 @@ spec:
 EOF
 
 echo "Waiting for Redis server..."
-kubectl wait --for=condition=ready pod/redis-server -n ${NAMESPACE} --timeout=120s
-REDIS_IP=$(kubectl get pod -n ${NAMESPACE} redis-server -o jsonpath='{.status.podIP}')
+wait_for_pod_ready "${NAMESPACE}" redis-server
+REDIS_IP=$(pod_ip "${NAMESPACE}" redis-server)
 echo "Redis server ready at ${REDIS_IP}"
 
 echo ""
 echo -e "${YELLOW}[2/5] Deploying benchmark pod...${NC}"
-kubectl delete pod redis-benchmark -n ${NAMESPACE} --ignore-not-found=true >/dev/null 2>&1
 sleep 2
-
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: redis-benchmark
-  namespace: ${NAMESPACE}
-spec:
-  containers:
-  - name: benchmark
-    image: docker.1ms.run/redis:7-alpine
-    command: ["sleep", "3600"]
-EOF
-
-kubectl wait --for=condition=ready pod/redis-benchmark -n ${NAMESPACE} --timeout=120s
+ensure_benchmark_pod "${NAMESPACE}"
 echo "Benchmark pod ready"
 
 AUTOCACHE_IP=$(kubectl get pod -n ${NAMESPACE} -l app.kubernetes.io/name=autocache -o jsonpath='{.items[0].status.podIP}')
@@ -85,16 +64,16 @@ run_single_bench() {
     local host=$1
     local cmd=$2
     local key=$3
+    local result
     
-    result=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-        -h ${host} -p 6379 \
+    result=$(run_k8s_benchmark "${NAMESPACE}" "${host}" \
         -n ${REQUESTS} \
         -c ${CLIENTS} \
         -d ${DATA_SIZE} \
         -q \
-        ${cmd} ${key} 2>/dev/null | tail -1)
+        ${cmd} ${key} | tail -1)
     
-    rps=$(echo "$result" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    rps=$(printf '%s\n' "$result" | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
     echo "${rps:-0}"
 }
 
@@ -103,7 +82,7 @@ echo -e "${GREEN}--- Redis 7 ---${NC}"
 
 echo -n "  PING:  "
 REDIS_PING=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-    -h ${REDIS_IP} -p 6379 -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>/dev/null | grep PING_INLINE | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    -h ${REDIS_IP} -p 6379 -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>/dev/null | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
 echo "${REDIS_PING:-0} req/s"
 
 echo -n "  SET:   "
@@ -132,28 +111,31 @@ echo -e "${GREEN}--- AutoCache ---${NC}"
 
 echo -n "  PING:  "
 AC_PING=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
-    -h ${AUTOCACHE_IP} -p 6379 -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>/dev/null | grep PING_INLINE | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    -h ${AUTOCACHE_IP} -p 6379 -n ${REQUESTS} -c ${CLIENTS} -t ping -q 2>/dev/null | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
 echo "${AC_PING:-0} req/s"
 
 echo -n "  SET:   "
-AC_SET=$(run_single_bench ${AUTOCACHE_IP} "SET" "{b}:__rand_int__ __data__")
+AC_TAG=$(same_slot_tag compare)
+AC_SET=$(run_single_bench ${AUTOCACHE_IP} "SET" "${AC_TAG}:__rand_int__ __data__")
 echo "${AC_SET} req/s"
 
 echo -n "  GET:   "
-AC_GET=$(run_single_bench ${AUTOCACHE_IP} "GET" "{b}:__rand_int__")
+AC_GET=$(run_single_bench ${AUTOCACHE_IP} "GET" "${AC_TAG}:__rand_int__")
 echo "${AC_GET} req/s"
 
 echo -n "  INCR:  "
-AC_INCR=$(run_single_bench ${AUTOCACHE_IP} "INCR" "{b}:counter")
+AC_INCR=$(run_single_bench ${AUTOCACHE_IP} "INCR" "${AC_TAG}:counter")
 echo "${AC_INCR} req/s"
 
 echo -n "  LPUSH: "
-AC_LPUSH=$(run_single_bench ${AUTOCACHE_IP} "LPUSH" "{b}:list __data__")
+AC_LPUSH=$(run_single_bench ${AUTOCACHE_IP} "LPUSH" "${AC_TAG}:list __data__")
 echo "${AC_LPUSH} req/s"
 
 echo -n "  LPOP:  "
-AC_LPOP=$(run_single_bench ${AUTOCACHE_IP} "LPOP" "{b}:list")
+AC_LPOP=$(run_single_bench ${AUTOCACHE_IP} "LPOP" "${AC_TAG}:list")
 echo "${AC_LPOP} req/s"
+
+echo -e "${YELLOW}  Optional note: non-core command results may be zero if the target runtime does not expose that command in this environment.${NC}"
 
 echo ""
 echo -e "${YELLOW}[5/5] Results Comparison${NC}"

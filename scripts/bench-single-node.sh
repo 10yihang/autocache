@@ -1,21 +1,15 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+source "$(dirname "$0")/lib/bench-common.sh"
 
 # Check if redis-benchmark is installed
-if ! command -v redis-benchmark >/dev/null 2>&1; then
-    echo -e "${RED}Error: redis-benchmark is not installed locally.${NC}"
-    echo "Please install Redis on your Mac to get the benchmark tool:"
-    echo "  brew install redis"
-    exit 1
-fi
+require_cmd redis-benchmark
+require_cmd kubectl
+require_cmd nc
 
 # Get the cluster name from the sample yaml
-CLUSTER_NAME=$(grep -m1 'name:' config/samples/cache_v1alpha1_autocache.yaml | awk '{print $2}')
+CLUSTER_NAME=$(sample_cluster_name)
 
 echo -e "${GREEN}[1/3] Setting up Port Forwarding (${CLUSTER_NAME}-0)...${NC}"
 # Kill any existing port-forward on 6379
@@ -45,26 +39,27 @@ echo -e "${YELLOW}Testing PING (Latency)...${NC}"
 redis-benchmark -p 6379 -t ping -n 10000 -q
 
 echo -e "${YELLOW}Testing SET/GET (Throughput)...${NC}"
-echo -e "${YELLOW}Using hash tag {bench} to route all keys to same slot (avoids MOVED errors)${NC}"
+TAG=$(same_slot_tag single)
+echo -e "${YELLOW}Using hash tag ${TAG} to route all keys to same slot (avoids MOVED errors)${NC}"
 redis-benchmark -p 6379 -n 100000 -q \
     -c 50 \
-    SET '{bench}__rand_int__' __data__
+    SET "${TAG}:__rand_int__" __data__
 redis-benchmark -p 6379 -n 100000 -q \
     -c 50 \
-    GET '{bench}__rand_int__'
+    GET "${TAG}:__rand_int__"
 
 echo ""
 echo -e "${YELLOW}Testing MSET/MGET (Multi-key, same slot)...${NC}"
 redis-benchmark -p 6379 -n 10000 -q \
-    MSET '{bench}:a' v1 '{bench}:b' v2 '{bench}:c' v3
+    MSET "${TAG}:a" v1 "${TAG}:b" v2 "${TAG}:c" v3
 redis-benchmark -p 6379 -n 10000 -q \
-    MGET '{bench}:a' '{bench}:b' '{bench}:c'
+    MGET "${TAG}:a" "${TAG}:b" "${TAG}:c"
 
 echo ""
 echo -e "${YELLOW}Testing INCR (Counter operations)...${NC}"
 redis-benchmark -p 6379 -n 100000 -q \
     -c 50 \
-    INCR '{bench}:counter'
+    INCR "${TAG}:counter"
 
 echo -e "${GREEN}[3/3] Cleanup...${NC}"
 kill $PF_PID 2>/dev/null || true

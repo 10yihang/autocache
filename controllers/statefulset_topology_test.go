@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"strings"
 	"testing"
 
 	cachev1alpha1 "github.com/10yihang/autocache/api/v1alpha1"
@@ -44,5 +45,21 @@ func TestBuildStatefulSet_UsesTopologySpreadConstraints(t *testing.T) {
 	}
 	if sts.Spec.Template.Spec.PriorityClassName != "cache-critical" {
 		t.Fatalf("priorityClassName = %q, want cache-critical", sts.Spec.Template.Spec.PriorityClassName)
+	}
+
+	container := sts.Spec.Template.Spec.Containers[0]
+	dataMountFound := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "data" && mount.MountPath == "/data" {
+			dataMountFound = true
+			break
+		}
+	}
+	if !dataMountFound {
+		t.Fatal("expected data volume mount at /data")
+	}
+	joined := strings.Join(container.Command, " ")
+	if !strings.Contains(joined, "--data-dir /data") {
+		t.Fatalf("container command %q missing --data-dir /data", joined)
 	}
 }

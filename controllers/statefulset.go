@@ -237,13 +237,10 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 			Name:      "config",
 			MountPath: "/etc/autocache",
 		},
-	}
-
-	if ac.Spec.Storage != nil && ac.Spec.Storage.Enabled {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		{
 			Name:      "data",
 			MountPath: "/data",
-		})
+		},
 	}
 
 	// Health checks
@@ -284,6 +281,7 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 		Command: []string{
 			"/autocache",
 			"--config", "/etc/autocache/autocache.conf",
+			"--data-dir", "/data",
 			"--metrics-addr", ":9121",
 			"--cluster-enabled",
 			"--bind", "$(POD_IP)",
@@ -334,6 +332,15 @@ func (r *AutoCacheReconciler) buildVolumes(ac *cachev1alpha1.AutoCache) []corev1
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
+	}
+
+	if ac.Spec.Storage == nil || !ac.Spec.Storage.Enabled {
+		volumes = append(volumes, corev1.Volume{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
 	}
 
 	return volumes

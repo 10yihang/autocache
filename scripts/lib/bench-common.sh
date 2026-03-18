@@ -25,20 +25,36 @@ sample_cluster_name() {
 wait_for_pod_ready() {
   local namespace=$1
   local pod=$2
-  local timeout=${3:-120s}
-  kubectl wait --for=condition=ready "pod/${pod}" -n "${namespace}" --timeout="${timeout}"
+  local timeout=${3:-120}
+  timeout=${timeout%s}
+  local elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if kubectl get pod "$pod" -n "$namespace" >/dev/null 2>&1; then
+      ready=$(kubectl get pod "$pod" -n "$namespace" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
+      if [ "$ready" = "true" ]; then
+        return 0
+      fi
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo -e "${RED}Timed out waiting for pod/${pod} to become Ready in namespace ${namespace}.${NC}"
+  kubectl get pod "$pod" -n "$namespace" -o wide || true
+  return 1
 }
 
 delete_pod_if_exists() {
   local namespace=$1
   shift
-  kubectl delete pod "$@" -n "${namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
+  kubectl delete pod "$@" -n "${namespace}" --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
 }
 
 ensure_benchmark_pod() {
   local namespace=$1
   local image=${2:-docker.1ms.run/redis:7-alpine}
-  delete_pod_if_exists "${namespace}" redis-benchmark
+  if kubectl get pod redis-benchmark -n "${namespace}" >/dev/null 2>&1; then
+    kubectl delete pod redis-benchmark -n "${namespace}" --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+  fi
   cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -70,6 +86,42 @@ run_k8s_benchmark() {
   local host=$2
   shift 2
   kubectl exec -n "${namespace}" redis-benchmark -- redis-benchmark -h "${host}" -p 6379 "$@" 2>/dev/null
+}
+
+cluster_slots_raw() {
+  local namespace=$1
+  local host=$2
+  kubectl exec -n "${namespace}" redis-benchmark -- redis-cli --raw -h "${host}" -p 6379 cluster slots 2>/dev/null
+}
+
+cluster_keyslot() {
+  local namespace=$1
+  local host=$2
+  local key=$3
+  kubectl exec -n "${namespace}" redis-benchmark -- redis-cli -h "${host}" -p 6379 cluster keyslot "$key" 2>/dev/null | tr -dc '0-9'
+}
+
+cluster_owner_for_slot() {
+  local namespace=$1
+  local host=$2
+  local slot=$3
+  local raw
+  raw=$(cluster_slots_raw "${namespace}" "${host}")
+  python3 - "$slot" "$raw" <<'PY'
+import sys
+slot = int(sys.argv[1])
+raw = sys.argv[2]
+lines = [line.strip() for line in raw.splitlines() if line.strip()]
+for i in range(0, len(lines), 5):
+    if i + 2 >= len(lines):
+        break
+    start = int(lines[i])
+    end = int(lines[i + 1])
+    ip = lines[i + 2]
+    if start <= slot <= end:
+        print(ip)
+        break
+PY
 }
 
 safe_bench_output() {

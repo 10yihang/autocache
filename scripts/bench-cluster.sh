@@ -31,6 +31,42 @@ for pod in "${POD_ARRAY[@]}"; do
     POD_IPS+=("$ip")
 done
 
+slot_range_for_ip() {
+    local ip=$1
+    local raw
+    raw=$(cluster_slots_raw "${NAMESPACE}" "${POD_IPS[0]}")
+    python3 - "$ip" "$raw" <<'PY'
+import sys
+ip = sys.argv[1]
+raw = sys.argv[2]
+lines = [line.strip() for line in raw.splitlines() if line.strip()]
+for i in range(0, len(lines), 5):
+    if i + 2 >= len(lines):
+        break
+    start = lines[i]
+    end = lines[i + 1]
+    owner = lines[i + 2]
+    if owner == ip:
+        print(f"{start}-{end}")
+        break
+PY
+}
+
+find_tag_for_range() {
+    local start=$1
+    local end=$2
+    local candidate tag slot
+    for candidate in $(seq 0 4096); do
+        tag=$(same_slot_tag "$candidate")
+        slot=$(cluster_keyslot "${NAMESPACE}" "${POD_IPS[0]}" "${tag}:probe")
+        if [ -n "$slot" ] && [ "$slot" -ge "$start" ] && [ "$slot" -le "$end" ]; then
+            printf '%s' "$tag"
+            return 0
+        fi
+    done
+    return 1
+}
+
 echo -e "${YELLOW}[1/4] Verifying cluster state...${NC}"
 kubectl exec -n ${NAMESPACE} ${POD_ARRAY[0]} -- /autocache -cli CLUSTER INFO 2>/dev/null | grep -E "cluster_state|cluster_slots_assigned|cluster_known_nodes" | tr -d '$'
 echo ""
@@ -52,9 +88,12 @@ bench_rps() {
 for i in "${!POD_ARRAY[@]}"; do
     pod=${POD_ARRAY[$i]}
     ip=${POD_IPS[$i]}
-    tag=$(same_slot_tag "$i")
+    range=$(slot_range_for_ip "$ip")
+    start=${range%-*}
+    end=${range#*-}
+    tag=$(find_tag_for_range "$start" "$end")
     
-    echo -e "${GREEN}--- Node $i: ${pod} (${ip}) tag=${tag} ---${NC}"
+    echo -e "${GREEN}--- Node $i: ${pod} (${ip}) range=${range} tag=${tag} ---${NC}"
     
     echo -n "  SET: "
     bench_rps "${NAMESPACE}" "${ip}" \
@@ -82,7 +121,10 @@ mkdir -p ${RESULTS_DIR}
 PIDS=()
 for i in "${!POD_ARRAY[@]}"; do
     ip=${POD_IPS[$i]}
-    tag=$(same_slot_tag "$i")
+    range=$(slot_range_for_ip "$ip")
+    start=${range%-*}
+    end=${range#*-}
+    tag=$(find_tag_for_range "$start" "$end")
     (
         result=$(bench_rps "${NAMESPACE}" "${ip}" \
             -n $((REQUESTS / POD_COUNT)) \
@@ -114,7 +156,10 @@ done
 PIDS=()
 for i in "${!POD_ARRAY[@]}"; do
     ip=${POD_IPS[$i]}
-    tag=$(same_slot_tag "$i")
+    range=$(slot_range_for_ip "$ip")
+    start=${range%-*}
+    end=${range#*-}
+    tag=$(find_tag_for_range "$start" "$end")
     (
         result=$(bench_rps "${NAMESPACE}" "${ip}" \
             -n $((REQUESTS / POD_COUNT)) \

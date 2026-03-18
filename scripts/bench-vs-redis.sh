@@ -17,7 +17,7 @@ echo ""
 
 cleanup() {
     echo -e "${YELLOW}Cleaning up...${NC}"
-    delete_pod_if_exists "${NAMESPACE}" redis-server redis-benchmark
+    delete_pod_if_exists "${NAMESPACE}" redis-server autocache-standalone redis-benchmark
 }
 trap cleanup EXIT
 
@@ -38,6 +38,9 @@ spec:
     ports:
     - containerPort: 6379
     resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
       limits:
         cpu: "1"
         memory: "512Mi"
@@ -49,13 +52,57 @@ REDIS_IP=$(pod_ip "${NAMESPACE}" redis-server)
 echo "Redis server ready at ${REDIS_IP}"
 
 echo ""
+echo -e "${YELLOW}[1b/5] Deploying standalone AutoCache baseline...${NC}"
+delete_pod_if_exists "${NAMESPACE}" autocache-standalone
+
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: autocache-standalone
+  namespace: ${NAMESPACE}
+spec:
+  containers:
+  - name: autocache
+    image: autocache:latest
+    imagePullPolicy: Never
+    command:
+      - /autocache
+      - --addr
+      - :6379
+      - --data-dir
+      - /data
+      - --metrics-addr
+      - :9121
+      - --quiet-connections
+    ports:
+      - containerPort: 6379
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "1"
+        memory: "512Mi"
+    volumeMounts:
+      - name: data
+        mountPath: /data
+  volumes:
+    - name: data
+      emptyDir: {}
+EOF
+
+echo "Waiting for standalone AutoCache..."
+wait_for_pod_ready "${NAMESPACE}" autocache-standalone
+AUTOCACHE_IP=$(pod_ip "${NAMESPACE}" autocache-standalone)
+echo "Standalone AutoCache ready at ${AUTOCACHE_IP}"
+
+echo ""
 echo -e "${YELLOW}[2/5] Deploying benchmark pod...${NC}"
 sleep 2
 ensure_benchmark_pod "${NAMESPACE}"
 echo "Benchmark pod ready"
-
-AUTOCACHE_IP=$(kubectl get pod -n ${NAMESPACE} -l app.kubernetes.io/name=autocache -o jsonpath='{.items[0].status.podIP}')
-echo "AutoCache node: ${AUTOCACHE_IP}"
+echo "AutoCache benchmark target: ${AUTOCACHE_IP}"
 echo ""
 
 RESULTS_FILE="/tmp/bench_results_$$"
@@ -115,24 +162,23 @@ AC_PING=$(kubectl exec -n ${NAMESPACE} redis-benchmark -- redis-benchmark \
 echo "${AC_PING:-0} req/s"
 
 echo -n "  SET:   "
-AC_TAG=$(same_slot_tag compare)
-AC_SET=$(run_single_bench ${AUTOCACHE_IP} "SET" "${AC_TAG}:__rand_int__ __data__")
+AC_SET=$(run_single_bench ${AUTOCACHE_IP} "SET" "autocache:__rand_int__ __data__")
 echo "${AC_SET} req/s"
 
 echo -n "  GET:   "
-AC_GET=$(run_single_bench ${AUTOCACHE_IP} "GET" "${AC_TAG}:__rand_int__")
+AC_GET=$(run_single_bench ${AUTOCACHE_IP} "GET" "autocache:__rand_int__")
 echo "${AC_GET} req/s"
 
 echo -n "  INCR:  "
-AC_INCR=$(run_single_bench ${AUTOCACHE_IP} "INCR" "${AC_TAG}:counter")
+AC_INCR=$(run_single_bench ${AUTOCACHE_IP} "INCR" "autocache:counter")
 echo "${AC_INCR} req/s"
 
 echo -n "  LPUSH: "
-AC_LPUSH=$(run_single_bench ${AUTOCACHE_IP} "LPUSH" "${AC_TAG}:list __data__")
+AC_LPUSH=$(run_single_bench ${AUTOCACHE_IP} "LPUSH" "autocache:list __data__")
 echo "${AC_LPUSH} req/s"
 
 echo -n "  LPOP:  "
-AC_LPOP=$(run_single_bench ${AUTOCACHE_IP} "LPOP" "${AC_TAG}:list")
+AC_LPOP=$(run_single_bench ${AUTOCACHE_IP} "LPOP" "autocache:list")
 echo "${AC_LPOP} req/s"
 
 echo -e "${YELLOW}  Optional note: non-core command results may be zero if the target runtime does not expose that command in this environment.${NC}"
@@ -194,8 +240,7 @@ echo -e "${CYAN}╚═══════════╩════════�
 echo ""
 echo -e "${YELLOW}Notes:${NC}"
 echo "  - Both tests run in the same K8s cluster with similar resource limits"
-echo "  - AutoCache uses hash tag {b} to route all keys to single node"
-echo "  - Redis runs in standalone mode (no cluster overhead)"
+echo "  - AutoCache and Redis both run in standalone Pod mode for this comparison"
 echo "  - Ratio > 1.0 means AutoCache is faster (green)"
 echo "  - Ratio < 1.0 means Redis is faster (red)"
 echo ""

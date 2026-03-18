@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -97,6 +98,18 @@ func (r *AutoCacheReconciler) reconcileStatefulSet(ctx context.Context, ac *cach
 			needUpdate = true
 			ac.Status.Phase = cachev1alpha1.ClusterPhaseUpdating
 		}
+	}
+
+	if !reflect.DeepEqual(existingSts.Spec.Template, sts.Spec.Template) {
+		existingSts.Spec.Template = sts.Spec.Template
+		needUpdate = true
+		ac.Status.Phase = cachev1alpha1.ClusterPhaseUpdating
+	}
+
+	if !reflect.DeepEqual(existingSts.Spec.VolumeClaimTemplates, sts.Spec.VolumeClaimTemplates) {
+		existingSts.Spec.VolumeClaimTemplates = sts.Spec.VolumeClaimTemplates
+		needUpdate = true
+		ac.Status.Phase = cachev1alpha1.ClusterPhaseUpdating
 	}
 
 	if needUpdate {
@@ -437,9 +450,34 @@ func (r *AutoCacheReconciler) updateStatus(ctx context.Context, ac *cachev1alpha
 	}
 
 	// Update phase
+	healthFn := r.getClusterHealthFn
+	if healthFn == nil {
+		healthFn = getClusterHealthAtAddr
+	}
 	if ac.Status.ReadyReplicas == ac.Spec.Replicas && ac.Status.Replicas == ac.Spec.Replicas {
-		ac.Status.Phase = cachev1alpha1.ClusterPhaseRunning
-		ac.Status.ClusterStatus = "ok"
+		clusterHealthy := false
+		for _, node := range ac.Status.Nodes {
+			if !node.Ready || node.PodIP == "" {
+				continue
+			}
+			health, err := healthFn(ctx, fmt.Sprintf("%s:%d", node.PodIP, ac.Spec.Port))
+			if err == nil && health != nil {
+				ac.Status.ClusterStatus = health.Status
+				ac.Status.SlotsAssigned = int32(health.SlotsAssigned)
+				if health.Status == "ok" && health.KnownNodes == int(ac.Spec.Replicas) && health.SlotsAssigned > 0 {
+					clusterHealthy = true
+					break
+				}
+			}
+		}
+		if clusterHealthy {
+			ac.Status.Phase = cachev1alpha1.ClusterPhaseRunning
+		} else {
+			ac.Status.Phase = cachev1alpha1.ClusterPhasePending
+			if ac.Status.ClusterStatus == "" {
+				ac.Status.ClusterStatus = "fail"
+			}
+		}
 	}
 
 	// Update timestamp

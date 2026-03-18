@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cachev1alpha1 "github.com/10yihang/autocache/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -67,6 +68,46 @@ func TestReconcileStatefulSet_ReplicaChangeInvokesScaleManager(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected scale manager rebalance path to be invoked")
+	}
+}
+
+func TestReconcileStatefulSet_UpdatesPodTemplateChanges(t *testing.T) {
+	s := scheme.Scheme
+	s.AddKnownTypes(cachev1alpha1.GroupVersion, &cachev1alpha1.AutoCache{})
+
+	ac := &cachev1alpha1.AutoCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cache", Namespace: "default"},
+		Spec:       cachev1alpha1.AutoCacheSpec{Replicas: 3, Port: 6379, Image: "autocache:latest"},
+	}
+	sts := (&AutoCacheReconciler{Scheme: s}).buildStatefulSet(ac)
+	sts.Spec.Template.Spec.Containers[0].Command = []string{"/autocache", "--cluster-enabled"}
+	sts.Spec.Template.Spec.Containers[0].VolumeMounts = sts.Spec.Template.Spec.Containers[0].VolumeMounts[:1]
+	sts.Spec.Template.Spec.Volumes = sts.Spec.Template.Spec.Volumes[:2]
+
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(ac, sts).WithStatusSubresource(ac).Build()
+	r := &AutoCacheReconciler{Client: cl, Scheme: s}
+
+	if err := r.reconcileStatefulSet(context.Background(), ac); err != nil {
+		t.Fatalf("reconcileStatefulSet failed: %v", err)
+	}
+
+	updated := &appsv1.StatefulSet{}
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(sts), updated); err != nil {
+		t.Fatalf("get updated statefulset: %v", err)
+	}
+	command := strings.Join(updated.Spec.Template.Spec.Containers[0].Command, " ")
+	if !strings.Contains(command, "--data-dir /data") {
+		t.Fatalf("updated command %q missing --data-dir /data", command)
+	}
+	dataMountFound := false
+	for _, mount := range updated.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "data" && mount.MountPath == "/data" {
+			dataMountFound = true
+			break
+		}
+	}
+	if !dataMountFound {
+		t.Fatal("expected updated statefulset to include /data mount")
 	}
 }
 

@@ -13,11 +13,12 @@ import (
 )
 
 type Server struct {
-	addr     string
-	engine   ProtocolEngine
-	handler  *Handler
-	server   *redcon.Server
-	listener net.Listener
+	addr             string
+	engine           ProtocolEngine
+	handler          *Handler
+	server           *redcon.Server
+	listener         net.Listener
+	quietConnections bool
 
 	mu      sync.RWMutex
 	clients map[redcon.Conn]*Client
@@ -42,6 +43,10 @@ func NewServer(addr string, engine ProtocolEngine) *Server {
 
 func (s *Server) SetCluster(c *cluster.Cluster) {
 	s.handler.SetCluster(c)
+}
+
+func (s *Server) SetQuietConnections(quiet bool) {
+	s.quietConnections = quiet
 }
 
 func (s *Server) Start() error {
@@ -94,7 +99,9 @@ func (s *Server) handleAccept(conn redcon.Conn) bool {
 	}
 	s.mu.Unlock()
 
-	log.Printf("Client connected: %s", conn.RemoteAddr())
+	if !s.quietConnections {
+		log.Printf("Client connected: %s", conn.RemoteAddr())
+	}
 	metrics2.RecordConnection(1)
 	return true
 }
@@ -104,7 +111,9 @@ func (s *Server) handleClose(conn redcon.Conn, err error) {
 	delete(s.clients, conn)
 	s.mu.Unlock()
 
-	log.Printf("Client disconnected: %s", conn.RemoteAddr())
+	if !s.quietConnections {
+		log.Printf("Client disconnected: %s", conn.RemoteAddr())
+	}
 	metrics2.RecordConnection(-1)
 }
 

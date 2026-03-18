@@ -26,14 +26,15 @@ import (
 )
 
 var (
-	addr           = flag.String("addr", ":6379", "server address")
-	clusterEnabled = flag.Bool("cluster-enabled", false, "enable cluster mode")
-	clusterPort    = flag.Int("cluster-port", 16379, "cluster communication port")
-	nodeID         = flag.String("node-id", "", "node ID (auto-generated if empty)")
-	bindAddr       = flag.String("bind", "127.0.0.1", "bind address for cluster")
-	seeds          = flag.String("seeds", "", "comma-separated seed nodes (host:port)")
-	dataDir        = flag.String("data-dir", "./data", "data directory for persistent state")
-	configPath     = flag.String("config", "", "path to config file")
+	addr             = flag.String("addr", ":6379", "server address")
+	clusterEnabled   = flag.Bool("cluster-enabled", false, "enable cluster mode")
+	clusterPort      = flag.Int("cluster-port", 16379, "cluster communication port")
+	nodeID           = flag.String("node-id", "", "node ID (auto-generated if empty)")
+	bindAddr         = flag.String("bind", "127.0.0.1", "bind address for cluster")
+	seeds            = flag.String("seeds", "", "comma-separated seed nodes (host:port)")
+	dataDir          = flag.String("data-dir", "./data", "data directory for persistent state")
+	configPath       = flag.String("config", "", "path to config file")
+	quietConnections = flag.Bool("quiet-connections", false, "disable per-connection connect/disconnect logs")
 
 	// Tiered storage flags
 	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
@@ -109,6 +110,7 @@ func main() {
 	}
 
 	server := protocol.NewServer(*addr, engine)
+	server.SetQuietConnections(*quietConnections)
 	var clusterInstance *cluster.Cluster
 	var stateManager *state.StateManager
 

@@ -79,6 +79,15 @@ type AutoCacheSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// +optional
+	SchedulerName string `json:"schedulerName,omitempty"`
+
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// PodAnnotations defines annotations to add to pods
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`

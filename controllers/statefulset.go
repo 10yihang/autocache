@@ -60,9 +60,34 @@ func (r *AutoCacheReconciler) reconcileStatefulSet(ctx context.Context, ac *cach
 
 	// Replica count change
 	if *existingSts.Spec.Replicas != ac.Spec.Replicas {
+		oldReplicas := *existingSts.Spec.Replicas
 		existingSts.Spec.Replicas = &ac.Spec.Replicas
 		needUpdate = true
 		ac.Status.Phase = cachev1alpha1.ClusterPhaseScaling
+
+		if err := r.Update(ctx, existingSts); err != nil {
+			return err
+		}
+
+		newScaleManager := r.newScaleManagerFn
+		if newScaleManager == nil {
+			newScaleManager = NewScaleManager
+		}
+		scaleManager := newScaleManager(r.Client)
+		if r.sendCommandFn != nil {
+			scaleManager.sendCommandFn = r.sendCommandFn
+		}
+		if ac.Spec.Replicas > oldReplicas {
+			if err := scaleManager.HandleScaleUp(ctx, ac, ac.Spec.Replicas, oldReplicas); err != nil {
+				return err
+			}
+		} else {
+			if err := scaleManager.HandleScaleDown(ctx, ac, ac.Spec.Replicas, oldReplicas); err != nil {
+				return err
+			}
+		}
+
+		return r.Status().Update(ctx, ac)
 	}
 
 	// Image change
@@ -139,12 +164,15 @@ func (r *AutoCacheReconciler) buildStatefulSet(ac *cachev1alpha1.AutoCache) *app
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{initContainer},
-					Containers:     []corev1.Container{container},
-					Volumes:        volumes,
-					Affinity:       r.buildAffinity(ac),
-					Tolerations:    ac.Spec.Tolerations,
-					NodeSelector:   ac.Spec.NodeSelector,
+					InitContainers:            []corev1.Container{initContainer},
+					Containers:                []corev1.Container{container},
+					Volumes:                   volumes,
+					Affinity:                  r.buildAffinity(ac),
+					Tolerations:               ac.Spec.Tolerations,
+					NodeSelector:              ac.Spec.NodeSelector,
+					TopologySpreadConstraints: ac.Spec.TopologySpreadConstraints,
+					SchedulerName:             ac.Spec.SchedulerName,
+					PriorityClassName:         ac.Spec.PriorityClassName,
 				},
 			},
 			VolumeClaimTemplates: volumeClaimTemplates,
@@ -255,6 +283,8 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 		ReadinessProbe:  readinessProbe,
 		Command: []string{
 			"/autocache",
+			"--config", "/etc/autocache/autocache.conf",
+			"--metrics-addr", ":9121",
 			"--cluster-enabled",
 			"--bind", "$(POD_IP)",
 		},

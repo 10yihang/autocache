@@ -78,8 +78,8 @@ graph TD
 ```
 
 ### Tiered Storage
-AutoCache supports tiered storage to balance performance and cost. 
-*Note: Engine modules are available; default server configuration uses memory only.*
+AutoCache supports tiered storage to balance performance and cost.
+The current validated path is Memory (Hot) + BadgerDB (Warm); S3 (Cold) is still experimental and not enabled in the primary benchmark/demo flow.
 
 ```mermaid
 graph LR

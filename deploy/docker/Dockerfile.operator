@@ -19,11 +19,10 @@ COPY controllers/ controllers/
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/operator/main.go
 
-# Use distroless as minimal base image to package the manager binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.nju.edu.cn/distroless/static:nonroot
+FROM docker.1ms.run/library/alpine:3.20
 WORKDIR /
 COPY --from=builder /workspace/manager .
-USER 65532:65532
+RUN apk add --no-cache ca-certificates && addgroup -S autocache && adduser -S autocache -G autocache
+USER autocache
 
 ENTRYPOINT ["/manager"]

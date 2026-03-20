@@ -2,10 +2,13 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/memory"
+	"github.com/10yihang/autocache/internal/engine/tiered"
 )
 
 func TestMemoryStoreAdapter_GetSet(t *testing.T) {
@@ -148,4 +151,51 @@ func TestMemoryStoreAdapter_ImplementsInterface(t *testing.T) {
 	defer store.Close()
 
 	var _ ProtocolEngine = NewMemoryStoreAdapter(store)
+}
+
+func TestTieredStoreAdapter_WithoutHotTierRejectsMemoryOnlyCommands(t *testing.T) {
+	cfg := tiered.DefaultConfig()
+	cfg.HotTierEnabled = false
+	cfg.WarmTierEnabled = true
+	cfg.WarmTierEngine = "nokv"
+	cfg.WarmTierPath = t.TempDir()
+	cfg.ColdTierEnabled = false
+
+	manager, err := tiered.NewManager(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer manager.Stop()
+
+	adapter := NewTieredStoreAdapter(manager, nil)
+	ctx := context.Background()
+
+	if err := adapter.Set(ctx, "key", "value", 0); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	value, err := adapter.GetBytes(ctx, "key")
+	if err != nil {
+		t.Fatalf("GetBytes failed: %v", err)
+	}
+	if string(value) != "value" {
+		t.Fatalf("GetBytes = %q, want %q", value, "value")
+	}
+
+	if _, err := adapter.HSet(ctx, "hash", "field", "value"); !errors.Is(err, engine.ErrNotSupported) {
+		t.Fatalf("HSet error = %v, want %v", err, engine.ErrNotSupported)
+	}
+	if _, err := adapter.Incr(ctx, "counter"); !errors.Is(err, engine.ErrNotSupported) {
+		t.Fatalf("Incr error = %v, want %v", err, engine.ErrNotSupported)
+	}
+	if err := adapter.RestoreEntry(ctx, "hash", engine.TypeHash, []byte("payload"), 0); !errors.Is(err, engine.ErrNotSupported) {
+		t.Fatalf("RestoreEntry error = %v, want %v", err, engine.ErrNotSupported)
+	}
+
+	if err := adapter.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if got := adapter.CountKeysInSlot(0); got != 0 {
+		t.Fatalf("CountKeysInSlot = %d, want 0", got)
+	}
 }

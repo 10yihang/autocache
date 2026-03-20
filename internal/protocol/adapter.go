@@ -260,6 +260,13 @@ type TieredStoreAdapter struct {
 	store   *memory.Store
 }
 
+func (a *TieredStoreAdapter) memoryStore() (*memory.Store, error) {
+	if a.store == nil {
+		return nil, engine.ErrNotSupported
+	}
+	return a.store, nil
+}
+
 func NewTieredStoreAdapter(manager *tiered.Manager, store *memory.Store) *TieredStoreAdapter {
 	return &TieredStoreAdapter{manager: manager, store: store}
 }
@@ -289,7 +296,11 @@ func (a *TieredStoreAdapter) GetSet(ctx context.Context, key string, value strin
 }
 
 func (a *TieredStoreAdapter) Incr(ctx context.Context, key string) (int64, error) {
-	return a.store.Incr(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.Incr(ctx, key)
 }
 
 func (a *TieredStoreAdapter) IncrBy(ctx context.Context, key string, delta int64) (int64, error) {
@@ -297,7 +308,11 @@ func (a *TieredStoreAdapter) IncrBy(ctx context.Context, key string, delta int64
 }
 
 func (a *TieredStoreAdapter) Decr(ctx context.Context, key string) (int64, error) {
-	return a.store.Decr(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.Decr(ctx, key)
 }
 
 func (a *TieredStoreAdapter) DecrBy(ctx context.Context, key string, delta int64) (int64, error) {
@@ -317,119 +332,235 @@ func (a *TieredStoreAdapter) MGetBytes(ctx context.Context, keys ...string) ([][
 }
 
 func (a *TieredStoreAdapter) MSet(ctx context.Context, pairs ...interface{}) error {
-	return a.store.MSet(ctx, pairs...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return err
+	}
+	return store.MSet(ctx, pairs...)
 }
 
 func (a *TieredStoreAdapter) HGet(ctx context.Context, key, field string) (string, error) {
-	return a.store.HGet(ctx, key, field)
+	store, err := a.memoryStore()
+	if err != nil {
+		return "", err
+	}
+	return store.HGet(ctx, key, field)
 }
 
 func (a *TieredStoreAdapter) HSet(ctx context.Context, key string, pairs ...interface{}) (int64, error) {
-	return a.store.HSet(ctx, key, pairs...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.HSet(ctx, key, pairs...)
 }
 
 func (a *TieredStoreAdapter) HDel(ctx context.Context, key string, fields ...string) (int64, error) {
-	return a.store.HDel(ctx, key, fields...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.HDel(ctx, key, fields...)
 }
 
 func (a *TieredStoreAdapter) HExists(ctx context.Context, key, field string) (bool, error) {
-	return a.store.HExists(ctx, key, field)
+	store, err := a.memoryStore()
+	if err != nil {
+		return false, err
+	}
+	return store.HExists(ctx, key, field)
 }
 
 func (a *TieredStoreAdapter) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	return a.store.HGetAll(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.HGetAll(ctx, key)
 }
 
 func (a *TieredStoreAdapter) HKeys(ctx context.Context, key string) ([]string, error) {
-	return a.store.HKeys(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.HKeys(ctx, key)
 }
 
 func (a *TieredStoreAdapter) HVals(ctx context.Context, key string) ([]string, error) {
-	return a.store.HVals(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.HVals(ctx, key)
 }
 
 func (a *TieredStoreAdapter) HLen(ctx context.Context, key string) (int64, error) {
-	return a.store.HLen(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.HLen(ctx, key)
 }
 
 func (a *TieredStoreAdapter) LPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return a.store.LPush(ctx, key, values...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.LPush(ctx, key, values...)
 }
 
 func (a *TieredStoreAdapter) RPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return a.store.RPush(ctx, key, values...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.RPush(ctx, key, values...)
 }
 
 func (a *TieredStoreAdapter) LPop(ctx context.Context, key string) (string, error) {
-	return a.store.LPop(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return "", err
+	}
+	return store.LPop(ctx, key)
 }
 
 func (a *TieredStoreAdapter) RPop(ctx context.Context, key string) (string, error) {
-	return a.store.RPop(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return "", err
+	}
+	return store.RPop(ctx, key)
 }
 
 func (a *TieredStoreAdapter) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
-	return a.store.LRange(ctx, key, start, stop)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.LRange(ctx, key, start, stop)
 }
 
 func (a *TieredStoreAdapter) LLen(ctx context.Context, key string) (int64, error) {
-	return a.store.LLen(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.LLen(ctx, key)
 }
 
 func (a *TieredStoreAdapter) LIndex(ctx context.Context, key string, index int64) (string, error) {
-	return a.store.LIndex(ctx, key, index)
+	store, err := a.memoryStore()
+	if err != nil {
+		return "", err
+	}
+	return store.LIndex(ctx, key, index)
 }
 
 func (a *TieredStoreAdapter) LSet(ctx context.Context, key string, index int64, value string) error {
-	return a.store.LSet(ctx, key, index, value)
+	store, err := a.memoryStore()
+	if err != nil {
+		return err
+	}
+	return store.LSet(ctx, key, index, value)
 }
 
 func (a *TieredStoreAdapter) LTrim(ctx context.Context, key string, start, stop int64) error {
-	return a.store.LTrim(ctx, key, start, stop)
+	store, err := a.memoryStore()
+	if err != nil {
+		return err
+	}
+	return store.LTrim(ctx, key, start, stop)
 }
 
 func (a *TieredStoreAdapter) SAdd(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return a.store.SAdd(ctx, key, members...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.SAdd(ctx, key, members...)
 }
 
 func (a *TieredStoreAdapter) SRem(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return a.store.SRem(ctx, key, members...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.SRem(ctx, key, members...)
 }
 
 func (a *TieredStoreAdapter) SMembers(ctx context.Context, key string) ([]string, error) {
-	return a.store.SMembers(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.SMembers(ctx, key)
 }
 
 func (a *TieredStoreAdapter) SIsMember(ctx context.Context, key, member string) (bool, error) {
-	return a.store.SIsMember(ctx, key, member)
+	store, err := a.memoryStore()
+	if err != nil {
+		return false, err
+	}
+	return store.SIsMember(ctx, key, member)
 }
 
 func (a *TieredStoreAdapter) SCard(ctx context.Context, key string) (int64, error) {
-	return a.store.SCard(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.SCard(ctx, key)
 }
 
 func (a *TieredStoreAdapter) ZAdd(ctx context.Context, key string, members ...engine.ZMember) (int64, error) {
-	return a.store.ZAdd(ctx, key, members...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ZAdd(ctx, key, members...)
 }
 
 func (a *TieredStoreAdapter) ZRem(ctx context.Context, key string, members ...string) (int64, error) {
-	return a.store.ZRem(ctx, key, members...)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ZRem(ctx, key, members...)
 }
 
 func (a *TieredStoreAdapter) ZRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
-	return a.store.ZRange(ctx, key, start, stop)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ZRange(ctx, key, start, stop)
 }
 
 func (a *TieredStoreAdapter) ZScore(ctx context.Context, key, member string) (float64, error) {
-	return a.store.ZScore(ctx, key, member)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ZScore(ctx, key, member)
 }
 
 func (a *TieredStoreAdapter) ZRank(ctx context.Context, key, member string) (int64, error) {
-	return a.store.ZRank(ctx, key, member)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ZRank(ctx, key, member)
 }
 
 func (a *TieredStoreAdapter) ZCard(ctx context.Context, key string) (int64, error) {
-	return a.store.ZCard(ctx, key)
+	store, err := a.memoryStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ZCard(ctx, key)
 }
 
 func (a *TieredStoreAdapter) Del(ctx context.Context, keys ...string) (int64, error) {
@@ -457,7 +588,11 @@ func (a *TieredStoreAdapter) Rename(ctx context.Context, key, newkey string) err
 	_, _ = a.manager.Del(ctx, newkey)
 	_, _ = a.manager.Del(ctx, key)
 	if entry.Type != engine.TypeString {
-		return a.store.RestoreEntry(ctx, newkey, entry.Type, mustSerializeEntry(entry), ttl)
+		store, err := a.memoryStore()
+		if err != nil {
+			return err
+		}
+		return store.RestoreEntry(ctx, newkey, entry.Type, mustSerializeEntry(entry), ttl)
 	}
 	value, err := tieredStringValue(entry)
 	if err != nil {
@@ -467,7 +602,11 @@ func (a *TieredStoreAdapter) Rename(ctx context.Context, key, newkey string) err
 }
 
 func (a *TieredStoreAdapter) Scan(ctx context.Context, cursor uint64, pattern string, count int) ([]string, uint64, error) {
-	return a.store.Scan(ctx, cursor, pattern, count)
+	store, err := a.memoryStore()
+	if err != nil {
+		return nil, 0, err
+	}
+	return store.Scan(ctx, cursor, pattern, count)
 }
 
 func (a *TieredStoreAdapter) TTL(ctx context.Context, key string) (time.Duration, error) {
@@ -499,7 +638,11 @@ func (a *TieredStoreAdapter) GetEntry(ctx context.Context, key string) (*engine.
 }
 
 func (a *TieredStoreAdapter) RestoreEntry(ctx context.Context, key string, valueType engine.ValueType, payload []byte, ttl time.Duration) error {
-	return a.store.RestoreEntry(ctx, key, valueType, payload, ttl)
+	store, err := a.memoryStore()
+	if err != nil {
+		return err
+	}
+	return store.RestoreEntry(ctx, key, valueType, payload, ttl)
 }
 
 func (a *TieredStoreAdapter) GetStats() interface{} {
@@ -507,14 +650,23 @@ func (a *TieredStoreAdapter) GetStats() interface{} {
 }
 
 func (a *TieredStoreAdapter) Close() error {
+	if a.store == nil {
+		return nil
+	}
 	return a.store.Close()
 }
 
 func (a *TieredStoreAdapter) KeysInSlot(slot uint16, count int) []string {
+	if a.store == nil {
+		return nil
+	}
 	return a.store.KeysInSlot(slot, count)
 }
 
 func (a *TieredStoreAdapter) CountKeysInSlot(slot uint16) int {
+	if a.store == nil {
+		return 0
+	}
 	return a.store.CountKeysInSlot(slot)
 }
 

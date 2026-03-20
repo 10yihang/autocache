@@ -37,6 +37,10 @@ func (m *Migrator) MigrationLoop() {
 
 // RunMigration executes a single migration run
 func (m *Migrator) RunMigration() {
+	if m.manager.hotTier == nil {
+		return
+	}
+
 	ctx := context.Background()
 
 	// Hot -> Warm
@@ -83,6 +87,9 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 	// Get from source
 	switch from {
 	case TierHot:
+		if m.manager.hotTier == nil {
+			return engine.ErrKeyNotFound
+		}
 		entry, err = m.manager.hotTier.GetEntry(ctx, key)
 		if err == nil {
 			value = entry.Value
@@ -125,7 +132,9 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 	// Delete from source
 	switch from {
 	case TierHot:
-		m.manager.hotTier.Del(ctx, key)
+		if m.manager.hotTier != nil {
+			m.manager.hotTier.Del(ctx, key)
+		}
 	case TierWarm:
 		if m.manager.warmTier != nil {
 			m.manager.warmTier.Del(ctx, key)

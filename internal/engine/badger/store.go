@@ -12,13 +12,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-func init() {
-	gob.Register(map[string]string{})
-	gob.Register([]string{})
-	gob.Register(map[string]struct{}{})
-	gob.Register(map[string]float64{})
-}
-
 // Store implements engine.Engine using BadgerDB
 type Store struct {
 	db *badger.DB

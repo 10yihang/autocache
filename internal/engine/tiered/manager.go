@@ -12,6 +12,7 @@ import (
 	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/badger"
 	"github.com/10yihang/autocache/internal/engine/memory"
+	"github.com/10yihang/autocache/internal/engine/nokv"
 	"github.com/10yihang/autocache/internal/engine/s3"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
 )
@@ -21,11 +22,15 @@ type Config struct {
 	// Enable tiering
 	Enabled bool
 
+	// Hot tier config
+	HotTierEnabled bool
+
 	// Hot tier capacity (bytes)
 	HotTierCapacity int64
 
 	// Warm tier config
 	WarmTierEnabled  bool
+	WarmTierEngine   string
 	WarmTierPath     string
 	WarmTierCapacity int64
 
@@ -50,8 +55,10 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:            true,
+		HotTierEnabled:     true,
 		HotTierCapacity:    512 * 1024 * 1024, // 512MB
 		WarmTierEnabled:    true,
+		WarmTierEngine:     "badger",
 		WarmTierPath:       "/data/warm",
 		WarmTierCapacity:   2 * 1024 * 1024 * 1024, // 2GB
 		ColdTierEnabled:    false,
@@ -95,6 +102,16 @@ type Manager struct {
 
 // NewManager creates a tiered manager
 func NewManager(cfg *Config, hotTier *memory.Store) (*Manager, error) {
+	if !cfg.HotTierEnabled && !cfg.WarmTierEnabled && !cfg.ColdTierEnabled {
+		return nil, fmt.Errorf("at least one tier must be enabled")
+	}
+	if cfg.HotTierEnabled && hotTier == nil {
+		return nil, fmt.Errorf("hot tier enabled requires memory store")
+	}
+	if !cfg.HotTierEnabled {
+		hotTier = nil
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	m := &Manager{
@@ -124,13 +141,22 @@ func NewManager(cfg *Config, hotTier *memory.Store) (*Manager, error) {
 		m.coldTier = coldTier
 	}
 
-	m.migrator = NewMigrator(m)
+	if m.hotTier != nil && (m.warmTier != nil || m.coldTier != nil) {
+		m.migrator = NewMigrator(m)
+	}
 
 	return m, nil
 }
 
 func (m *Manager) initWarmTier(path string) (engine.Engine, error) {
-	return badger.NewStore(path)
+	switch m.config.WarmTierEngine {
+	case "", "badger":
+		return badger.NewStore(path)
+	case "nokv":
+		return nokv.NewStore(path)
+	default:
+		return nil, fmt.Errorf("unknown warm tier engine: %s", m.config.WarmTierEngine)
+	}
 }
 
 func (m *Manager) initColdTier(endpoint, bucket string) (engine.Engine, error) {
@@ -139,8 +165,10 @@ func (m *Manager) initColdTier(endpoint, bucket string) (engine.Engine, error) {
 
 // Start starts background tasks
 func (m *Manager) Start() {
-	m.wg.Add(1)
-	go m.migrator.MigrationLoop()
+	if m.migrator != nil {
+		m.wg.Add(1)
+		go m.migrator.MigrationLoop()
+	}
 	log.Println("Tiered storage manager started")
 }
 
@@ -162,10 +190,12 @@ func (m *Manager) Stop() {
 // Get gets value from any tier
 func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 	// 1. Hot Tier
-	val, err := m.hotTier.Get(ctx, key)
-	if err == nil {
-		m.stats.RecordAccess(key, int64(len(val)))
-		return val, nil
+	if m.hotTier != nil {
+		val, err := m.hotTier.Get(ctx, key)
+		if err == nil {
+			m.stats.RecordAccess(key, int64(len(val)))
+			return val, nil
+		}
 	}
 
 	// 2. Warm Tier
@@ -207,21 +237,45 @@ func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 
 // Set sets value to hot tier
 func (m *Manager) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
-	err := m.hotTier.Set(ctx, key, value, ttl)
-	if err != nil {
-		return err
+	if m.hotTier != nil {
+		if err := m.hotTier.Set(ctx, key, value, ttl); err != nil {
+			return err
+		}
+		m.stats.RecordWrite(key, int64(len(value)))
+		m.stats.UpdateTier(key, TierHot)
+		return nil
+	}
+	if m.warmTier != nil {
+		if err := m.warmTier.Set(ctx, key, value, ttl); err != nil {
+			return err
+		}
+		m.stats.RecordWrite(key, int64(len(value)))
+		m.stats.UpdateTier(key, TierWarm)
+		return nil
+	}
+	if m.coldTier != nil {
+		if err := m.coldTier.Set(ctx, key, value, ttl); err != nil {
+			return err
+		}
+		m.stats.RecordWrite(key, int64(len(value)))
+		m.stats.UpdateTier(key, TierCold)
+		return nil
 	}
 
-	m.stats.RecordWrite(key, int64(len(value)))
-	return nil
+	return fmt.Errorf("no enabled tier available for set")
 }
 
 // Del deletes from all tiers
 func (m *Manager) Del(ctx context.Context, keys ...string) (int64, error) {
 	var count int64
 
-	c, _ := m.hotTier.Del(ctx, keys...)
-	count += c
+	if m.hotTier != nil {
+		c, err := m.hotTier.Del(ctx, keys...)
+		if err != nil {
+			return count, err
+		}
+		count += c
+	}
 
 	if m.warmTier != nil {
 		c, _ := m.warmTier.Del(ctx, keys...)
@@ -262,8 +316,10 @@ func (m *Manager) Keys(ctx context.Context, pattern string) ([]string, error) {
 			keys = append(keys, key)
 		}
 	}
-	if hotKeys, err := m.hotTier.Keys(ctx, pattern); err == nil {
-		appendKeys(hotKeys)
+	if m.hotTier != nil {
+		if hotKeys, err := m.hotTier.Keys(ctx, pattern); err == nil {
+			appendKeys(hotKeys)
+		}
 	}
 	if m.warmTier != nil {
 		if warmKeys, err := m.warmTier.Keys(ctx, pattern); err == nil {
@@ -300,8 +356,10 @@ func (m *Manager) Type(ctx context.Context, key string) (string, error) {
 }
 
 func (m *Manager) GetEntry(ctx context.Context, key string) (*engine.Entry, error) {
-	if entry, err := m.hotTier.GetEntry(ctx, key); err == nil {
-		return entry, nil
+	if m.hotTier != nil {
+		if entry, err := m.hotTier.GetEntry(ctx, key); err == nil {
+			return entry, nil
+		}
 	}
 	if m.warmTier != nil {
 		if entry, err := m.warmTier.Get(ctx, key); err == nil {
@@ -317,8 +375,10 @@ func (m *Manager) GetEntry(ctx context.Context, key string) (*engine.Entry, erro
 }
 
 func (m *Manager) TTL(ctx context.Context, key string) (time.Duration, error) {
-	if ttl, err := m.hotTier.TTL(ctx, key); err == nil && ttl != -2*time.Second {
-		return ttl, nil
+	if m.hotTier != nil {
+		if ttl, err := m.hotTier.TTL(ctx, key); err == nil && ttl != -2*time.Second {
+			return ttl, nil
+		}
 	}
 	if m.warmTier != nil {
 		if ttl, err := m.warmTier.TTL(ctx, key); err == nil && ttl != -2*time.Second {
@@ -334,8 +394,10 @@ func (m *Manager) TTL(ctx context.Context, key string) (time.Duration, error) {
 }
 
 func (m *Manager) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	if ok, _ := m.hotTier.Expire(ctx, key, ttl); ok {
-		return true, nil
+	if m.hotTier != nil {
+		if ok, _ := m.hotTier.Expire(ctx, key, ttl); ok {
+			return true, nil
+		}
 	}
 	if m.warmTier != nil {
 		if ok, _ := m.warmTier.Expire(ctx, key, ttl); ok {
@@ -355,8 +417,10 @@ func (m *Manager) ExpireAt(ctx context.Context, key string, t time.Time) (bool, 
 }
 
 func (m *Manager) Persist(ctx context.Context, key string) (bool, error) {
-	if ok, _ := m.hotTier.Persist(ctx, key); ok {
-		return true, nil
+	if m.hotTier != nil {
+		if ok, _ := m.hotTier.Persist(ctx, key); ok {
+			return true, nil
+		}
 	}
 	if m.warmTier != nil {
 		if ok, _ := m.warmTier.Persist(ctx, key); ok {
@@ -373,8 +437,10 @@ func (m *Manager) Persist(ctx context.Context, key string) (bool, error) {
 
 func (m *Manager) DBSize(ctx context.Context) (int64, error) {
 	var total int64
-	if n, err := m.hotTier.DBSize(ctx); err == nil {
-		total += n
+	if m.hotTier != nil {
+		if n, err := m.hotTier.DBSize(ctx); err == nil {
+			total += n
+		}
 	}
 	if m.warmTier != nil {
 		if n, err := m.warmTier.DBSize(ctx); err == nil {
@@ -390,8 +456,10 @@ func (m *Manager) DBSize(ctx context.Context) (int64, error) {
 }
 
 func (m *Manager) FlushDB(ctx context.Context) error {
-	if err := m.hotTier.FlushDB(ctx); err != nil {
-		return err
+	if m.hotTier != nil {
+		if err := m.hotTier.FlushDB(ctx); err != nil {
+			return err
+		}
 	}
 	if m.warmTier != nil {
 		if err := m.warmTier.FlushDB(ctx); err != nil {
@@ -503,6 +571,9 @@ func (m *Manager) MGetBytes(ctx context.Context, keys ...string) ([][]byte, erro
 }
 
 func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *engine.Entry) {
+	if m.hotTier == nil {
+		return
+	}
 	stats := m.stats.GetStats(key)
 	if m.policy.ShouldPromote(stats, TierWarm) {
 		ttl := entryTTL(entry)
@@ -520,6 +591,9 @@ func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *en
 }
 
 func (m *Manager) promoteFromCold(ctx context.Context, key, value string, entry *engine.Entry) {
+	if m.warmTier == nil {
+		return
+	}
 	ttl := entryTTL(entry)
 	go func() {
 		if m.warmTier != nil {

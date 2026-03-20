@@ -37,9 +37,16 @@ var (
 	quietConnections = flag.Bool("quiet-connections", false, "disable per-connection connect/disconnect logs")
 
 	// Tiered storage flags
-	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
-	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
-	metricsAddr   = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
+	tieredEnabled    = flag.Bool("tiered-enabled", false, "enable tiered storage")
+	hotTierEnabled   = flag.Bool("hot-tier-enabled", true, "enable memory hot tier")
+	warmTierEnabled  = flag.Bool("warm-tier-enabled", true, "enable disk warm tier")
+	warmEngine       = flag.String("warm-engine", "badger", "warm tier storage engine (badger, nokv)")
+	warmTierPath     = flag.String("warm-tier-path", "", "path for warm tier storage (default: <data-dir>/warm)")
+	badgerPath       = flag.String("badger-path", "", "deprecated: path for badger warm tier (use --warm-tier-path)")
+	coldTierEnabled  = flag.Bool("cold-tier-enabled", false, "enable cloud cold tier")
+	coldTierEndpoint = flag.String("cold-tier-endpoint", "", "cold tier endpoint")
+	coldTierBucket   = flag.String("cold-tier-bucket", "", "cold tier bucket")
+	metricsAddr      = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
 
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
@@ -64,8 +71,11 @@ func main() {
 		return
 	}
 
-	store := memory.NewStore(buildMemoryConfigFromConfig(fileConfig))
-	store.SetSlotFunc(hash.KeySlot)
+	var store *memory.Store
+	if !*tieredEnabled || *hotTierEnabled {
+		store = memory.NewStore(buildMemoryConfigFromConfig(fileConfig))
+		store.SetSlotFunc(hash.KeySlot)
+	}
 	metrics2.InitInfo("dev", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	metricsExporter := metrics2.NewExporter(*metricsAddr)
 	go func() {
@@ -78,17 +88,24 @@ func main() {
 	var tieredMgr *tiered.Manager
 
 	if *tieredEnabled {
-		warmPath := *badgerPath
-		if warmPath == "" {
-			warmPath = filepath.Join(*dataDir, "warm")
+		if !*hotTierEnabled && !*warmTierEnabled && !*coldTierEnabled {
+			log.Fatalf("Tiered storage requires at least one enabled tier")
+		}
+		warmPath := resolveWarmTierPath()
+		if *badgerPath != "" && *warmTierPath == "" {
+			log.Println("Flag --badger-path is deprecated; use --warm-tier-path instead")
 		}
 
 		tieredCfg := &tiered.Config{
 			Enabled:            true,
+			HotTierEnabled:     *hotTierEnabled,
 			HotTierCapacity:    512 * 1024 * 1024, // 512MB
-			WarmTierEnabled:    true,
+			WarmTierEnabled:    *warmTierEnabled,
+			WarmTierEngine:     *warmEngine,
 			WarmTierPath:       warmPath,
-			ColdTierEnabled:    false,
+			ColdTierEnabled:    *coldTierEnabled,
+			ColdTierEndpoint:   *coldTierEndpoint,
+			ColdTierBucket:     *coldTierBucket,
 			MigrationInterval:  time.Minute,
 			MigrationBatchSize: 100,
 			HotAccessThreshold: 10,
@@ -104,8 +121,14 @@ func main() {
 		tieredMgr.Start()
 
 		engine = protocol.NewTieredStoreAdapter(tieredMgr, store)
-		log.Println("Tiered storage enabled, warm tier:", warmPath)
+		log.Printf("Tiered storage enabled (hot=%t warm=%t cold=%t)", *hotTierEnabled, *warmTierEnabled, *coldTierEnabled)
+		if *warmTierEnabled {
+			log.Println("Warm tier path:", warmPath)
+		}
 	} else {
+		if store == nil {
+			log.Fatalf("Memory store must be enabled when tiered storage is disabled")
+		}
 		engine = protocol.NewMemoryStoreAdapter(store)
 	}
 
@@ -190,8 +213,10 @@ func main() {
 	if err := server.Stop(); err != nil {
 		log.Printf("Error stopping server: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		log.Printf("Error closing store: %v", err)
+	if store != nil {
+		if err := store.Close(); err != nil {
+			log.Printf("Error closing store: %v", err)
+		}
 	}
 }
 
@@ -231,6 +256,37 @@ func applyConfig(cfg map[string]string) {
 	if v, ok := cfg["cluster-enabled"]; ok {
 		*clusterEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
 	}
+	if v, ok := cfg["warm-engine"]; ok && v != "" {
+		*warmEngine = v
+	}
+	if v, ok := cfg["hot-tier-enabled"]; ok {
+		*hotTierEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+	if v, ok := cfg["warm-tier-enabled"]; ok {
+		*warmTierEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+	if v, ok := cfg["warm-tier-path"]; ok && v != "" {
+		*warmTierPath = v
+	}
+	if v, ok := cfg["cold-tier-enabled"]; ok {
+		*coldTierEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+	if v, ok := cfg["cold-tier-endpoint"]; ok && v != "" {
+		*coldTierEndpoint = v
+	}
+	if v, ok := cfg["cold-tier-bucket"]; ok && v != "" {
+		*coldTierBucket = v
+	}
+}
+
+func resolveWarmTierPath() string {
+	if *warmTierPath != "" {
+		return *warmTierPath
+	}
+	if *badgerPath != "" {
+		return *badgerPath
+	}
+	return filepath.Join(*dataDir, "warm")
 }
 
 func buildMemoryConfigFromConfig(cfg map[string]string) *memory.Config {
@@ -298,9 +354,10 @@ func runCLI(host string, port int, args []string) {
 		os.Exit(1)
 	}
 
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		fmt.Printf("Error connecting to %s:%d: %v\n", host, port, err)
+		fmt.Printf("Error connecting to %s: %v\n", addr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()

@@ -128,3 +128,37 @@ func TestTieredStorage_ColdTierExperimental(t *testing.T) {
 		t.Fatal("expected cold tier initialization to fail while experimental")
 	}
 }
+
+func TestTieredStorage_WarmOnly(t *testing.T) {
+	dir, err := os.MkdirTemp("", "warm-only-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := tiered.DefaultConfig()
+	cfg.HotTierEnabled = false
+	cfg.WarmTierEnabled = true
+	cfg.WarmTierEngine = "nokv"
+	cfg.WarmTierPath = dir
+	cfg.ColdTierEnabled = false
+
+	manager, err := tiered.NewManager(cfg, nil)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer manager.Stop()
+
+	ctx := context.Background()
+	if err := manager.Set(ctx, "key", "value", 0); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	val, err := manager.Get(ctx, "key")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if val != "value" {
+		t.Fatalf("Get returned %q, want %q", val, "value")
+	}
+}

@@ -12,6 +12,11 @@ go test -bench=. -benchmem ./test/tiered_benchmark/...
 
 - `BenchmarkHotOnlyGet` measures steady-state reads from the memory store
 - `BenchmarkTieredHotPathGet` measures steady-state reads with tiered manager enabled and warm tier configured
+- `BenchmarkWarmBackendGetParallel` measures direct warm-backend read throughput for `badger` vs `nokv`
+- `BenchmarkWarmBackendSetParallel` measures direct warm-backend write throughput for `badger` vs `nokv`
+- `BenchmarkWarmBackendMixedParallel` measures a 95/5 read-write mix on direct warm backends
+- `BenchmarkWarmBackendSetWithTTLParallel` measures write throughput when each key carries a TTL
+- `BenchmarkTieredWarmPathGet` measures reads after a key has been demoted into the warm tier and fetched through `tiered.Manager` (implemented in `internal/engine/tiered/manager_benchmark_test.go`)
 
 ## Notes
 

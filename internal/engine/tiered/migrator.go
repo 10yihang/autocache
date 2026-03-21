@@ -40,9 +40,13 @@ func (m *Migrator) RunMigration() {
 	ctx := context.Background()
 
 	// Hot -> Warm
-	coldKeys := m.manager.stats.GetColdKeys(m.manager.config.HotIdleThreshold, m.manager.config.HotAccessThreshold)
+	hotKeys := m.manager.stats.GetKeysByTier(TierHot)
 	demoted := 0
-	for _, key := range coldKeys {
+	for _, key := range hotKeys {
+		stats := m.manager.stats.GetStats(key)
+		if stats == nil || !m.manager.policy.ShouldDemote(key, stats, TierHot) {
+			continue
+		}
 		if demoted >= m.manager.config.MigrationBatchSize {
 			break
 		}
@@ -59,7 +63,7 @@ func (m *Migrator) RunMigration() {
 		demoted = 0
 		for _, key := range warmKeys {
 			stats := m.manager.stats.GetStats(key)
-			if stats == nil || !m.manager.policy.ShouldDemote(stats, TierWarm) {
+			if stats == nil || !m.manager.policy.ShouldDemote(key, stats, TierWarm) {
 				continue
 			}
 			if demoted >= m.manager.config.MigrationBatchSize {
@@ -137,5 +141,6 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 		metrics2.RecordTieredMigration("down")
 	}
 	m.manager.stats.UpdateTier(key, to)
+	m.manager.recordPolicyMove(key, from, to)
 	return nil
 }

@@ -101,9 +101,20 @@ func NewManager(cfg *Config, hotTier *memory.Store) (*Manager, error) {
 		config:  cfg,
 		hotTier: hotTier,
 		stats:   NewStatsCollector(1.0),
-		policy:  NewDefaultPolicy(),
-		ctx:     ctx,
-		cancel:  cancel,
+		policy: NewWTinyLFUCostAwarePolicy(WTinyLFUCostAwareConfig{
+			HotCapacity:               1024,
+			HotIdleThreshold:          cfg.HotIdleThreshold,
+			WindowPercentage:          1,
+			ProtectedPercentage:       80,
+			WarmPromotionMinFrequency: cfg.HotAccessThreshold,
+			WarmToColdDemoteThreshold: -0.5,
+			CostAccessWeight:          1.0,
+			CostRecencyWeight:         0.4,
+			CostSizePenaltyWeight:     0.2,
+			CostWritePenaltyWeight:    0.2,
+		}),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	if cfg.WarmTierEnabled {
@@ -165,6 +176,7 @@ func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 	val, err := m.hotTier.Get(ctx, key)
 	if err == nil {
 		m.stats.RecordAccess(key, int64(len(val)))
+		m.recordPolicyAccess(key, TierHot)
 		return val, nil
 	}
 
@@ -177,6 +189,7 @@ func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 				return "", err
 			}
 			m.stats.RecordAccess(key, int64(len(val)))
+			m.recordPolicyAccess(key, TierWarm)
 
 			// Consider promotion
 			m.maybePromote(ctx, key, val, entry)
@@ -194,6 +207,7 @@ func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 				return "", err
 			}
 			m.stats.RecordAccess(key, int64(len(val)))
+			m.recordPolicyAccess(key, TierCold)
 
 			// Promote from cold
 			m.promoteFromCold(ctx, key, val, entry)
@@ -213,6 +227,7 @@ func (m *Manager) Set(ctx context.Context, key string, value string, ttl time.Du
 	}
 
 	m.stats.RecordWrite(key, int64(len(value)))
+	m.recordPolicyWrite(key, TierHot)
 	return nil
 }
 
@@ -504,7 +519,7 @@ func (m *Manager) MGetBytes(ctx context.Context, keys ...string) ([][]byte, erro
 
 func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *engine.Entry) {
 	stats := m.stats.GetStats(key)
-	if m.policy.ShouldPromote(stats, TierWarm) {
+	if m.policy.ShouldPromote(key, stats, TierWarm) {
 		ttl := entryTTL(entry)
 		go func() {
 			m.hotTier.Set(ctx, key, value, ttl)
@@ -512,6 +527,7 @@ func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *en
 				m.warmTier.Del(ctx, key)
 			}
 			m.stats.UpdateTier(key, TierHot)
+			m.recordPolicyMove(key, TierWarm, TierHot)
 			m.migrationsUp.Add(1)
 			metrics2.RecordTieredMigration("up")
 			// log.Printf("Promoted key %s from warm to hot tier", key)
@@ -529,10 +545,29 @@ func (m *Manager) promoteFromCold(ctx context.Context, key, value string, entry 
 			m.coldTier.Del(ctx, key)
 		}
 		m.stats.UpdateTier(key, TierWarm)
+		m.recordPolicyMove(key, TierCold, TierWarm)
 		m.migrationsUp.Add(1)
 		metrics2.RecordTieredMigration("up")
 		// log.Printf("Promoted key %s from cold to warm tier", key)
 	}()
+}
+
+func (m *Manager) recordPolicyAccess(key string, tier TierType) {
+	if observer, ok := m.policy.(PolicyObserver); ok {
+		observer.RecordAccess(key, tier)
+	}
+}
+
+func (m *Manager) recordPolicyWrite(key string, tier TierType) {
+	if observer, ok := m.policy.(PolicyObserver); ok {
+		observer.RecordWrite(key, tier)
+	}
+}
+
+func (m *Manager) recordPolicyMove(key string, from, to TierType) {
+	if observer, ok := m.policy.(PolicyObserver); ok {
+		observer.RecordMove(key, from, to)
+	}
 }
 
 func entryTTL(entry *engine.Entry) time.Duration {

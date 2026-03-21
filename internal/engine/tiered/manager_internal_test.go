@@ -13,9 +13,9 @@ import (
 
 type alwaysPromotePolicy struct{}
 
-func (alwaysPromotePolicy) ShouldDemote(*AccessStats, TierType) bool  { return false }
-func (alwaysPromotePolicy) ShouldPromote(*AccessStats, TierType) bool { return true }
-func (alwaysPromotePolicy) GetTargetTier(*AccessStats) TierType       { return TierHot }
+func (alwaysPromotePolicy) ShouldDemote(string, *AccessStats, TierType) bool  { return false }
+func (alwaysPromotePolicy) ShouldPromote(string, *AccessStats, TierType) bool { return true }
+func (alwaysPromotePolicy) GetTargetTier(string, *AccessStats) TierType       { return TierHot }
 
 func TestManager_PromotionPreservesTTL(t *testing.T) {
 	dir, err := os.MkdirTemp("", "tiered-manager-test")

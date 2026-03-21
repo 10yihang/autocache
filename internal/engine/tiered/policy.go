@@ -1,19 +1,27 @@
 package tiered
 
 import (
+	"math"
+	"sync"
 	"time"
 )
 
 // TierPolicy defines tiering policy
 type TierPolicy interface {
 	// ShouldDemote checks if key should be demoted
-	ShouldDemote(stats *AccessStats, currentTier TierType) bool
+	ShouldDemote(key string, stats *AccessStats, currentTier TierType) bool
 
 	// ShouldPromote checks if key should be promoted
-	ShouldPromote(stats *AccessStats, currentTier TierType) bool
+	ShouldPromote(key string, stats *AccessStats, currentTier TierType) bool
 
 	// GetTargetTier gets target tier for a key
-	GetTargetTier(stats *AccessStats) TierType
+	GetTargetTier(key string, stats *AccessStats) TierType
+}
+
+type PolicyObserver interface {
+	RecordAccess(key string, tier TierType)
+	RecordWrite(key string, tier TierType)
+	RecordMove(key string, from, to TierType)
 }
 
 // DefaultPolicy implementation
@@ -42,7 +50,7 @@ func NewDefaultPolicy() *DefaultPolicy {
 }
 
 // ShouldDemote checks if key should be demoted
-func (p *DefaultPolicy) ShouldDemote(stats *AccessStats, currentTier TierType) bool {
+func (p *DefaultPolicy) ShouldDemote(_ string, stats *AccessStats, currentTier TierType) bool {
 	if stats == nil {
 		return false
 	}
@@ -63,7 +71,7 @@ func (p *DefaultPolicy) ShouldDemote(stats *AccessStats, currentTier TierType) b
 }
 
 // ShouldPromote checks if key should be promoted
-func (p *DefaultPolicy) ShouldPromote(stats *AccessStats, currentTier TierType) bool {
+func (p *DefaultPolicy) ShouldPromote(_ string, stats *AccessStats, currentTier TierType) bool {
 	if stats == nil {
 		return false
 	}
@@ -81,7 +89,7 @@ func (p *DefaultPolicy) ShouldPromote(stats *AccessStats, currentTier TierType) 
 }
 
 // GetTargetTier gets target tier
-func (p *DefaultPolicy) GetTargetTier(stats *AccessStats) TierType {
+func (p *DefaultPolicy) GetTargetTier(_ string, stats *AccessStats) TierType {
 	if stats == nil {
 		return TierHot
 	}
@@ -101,6 +109,247 @@ func (p *DefaultPolicy) GetTargetTier(stats *AccessStats) TierType {
 
 	// Low frequency AND idle -> Cold
 	return TierCold
+}
+
+type WTinyLFUCostAwareConfig struct {
+	HotCapacity               int
+	HotIdleThreshold          time.Duration
+	WindowPercentage          int
+	ProtectedPercentage       int
+	WarmPromotionMinFrequency uint64
+	WarmToColdDemoteThreshold float64
+	CostAccessWeight          float64
+	CostRecencyWeight         float64
+	CostSizePenaltyWeight     float64
+	CostWritePenaltyWeight    float64
+}
+
+type WTinyLFUCostAwarePolicy struct {
+	cfg WTinyLFUCostAwareConfig
+
+	mu sync.Mutex
+
+	windowAdmissionFreq uint8
+	protectedMinFreq    uint8
+	sampleLimit         int
+	sampleCount         int
+
+	sketch     *CountMinSketch
+	doorkeeper *BloomFilter
+	warmGhost  map[string]uint8
+}
+
+func NewWTinyLFUCostAwarePolicy(cfg WTinyLFUCostAwareConfig) *WTinyLFUCostAwarePolicy {
+	if cfg.HotCapacity <= 0 {
+		cfg.HotCapacity = 1024
+	}
+	if cfg.HotIdleThreshold <= 0 {
+		cfg.HotIdleThreshold = 5 * time.Minute
+	}
+	if cfg.WindowPercentage <= 0 {
+		cfg.WindowPercentage = 1
+	}
+	if cfg.ProtectedPercentage <= 0 || cfg.ProtectedPercentage >= 100 {
+		cfg.ProtectedPercentage = 80
+	}
+	if cfg.WarmPromotionMinFrequency == 0 {
+		cfg.WarmPromotionMinFrequency = 2
+	}
+	if cfg.CostAccessWeight == 0 {
+		cfg.CostAccessWeight = 1.0
+	}
+	if cfg.CostRecencyWeight == 0 {
+		cfg.CostRecencyWeight = 0.4
+	}
+	if cfg.CostSizePenaltyWeight == 0 {
+		cfg.CostSizePenaltyWeight = 0.2
+	}
+	if cfg.CostWritePenaltyWeight == 0 {
+		cfg.CostWritePenaltyWeight = 0.2
+	}
+	if cfg.WarmToColdDemoteThreshold == 0 {
+		cfg.WarmToColdDemoteThreshold = -0.5
+	}
+
+	windowAdmissionFreq := uint8(1)
+	if cfg.WarmPromotionMinFrequency > 1 {
+		windowAdmissionFreq = uint8((cfg.WarmPromotionMinFrequency*uint64(cfg.WindowPercentage) + 99) / 100)
+		if windowAdmissionFreq < 1 {
+			windowAdmissionFreq = 1
+		}
+	}
+	protectedMinFreq := uint8(cfg.WarmPromotionMinFrequency)
+	if protectedMinFreq < 1 {
+		protectedMinFreq = 1
+	}
+	sampleLimit := cfg.HotCapacity * 8
+	if sampleLimit < 1024 {
+		sampleLimit = 1024
+	}
+
+	return &WTinyLFUCostAwarePolicy{
+		cfg:                 cfg,
+		windowAdmissionFreq: windowAdmissionFreq,
+		protectedMinFreq:    protectedMinFreq,
+		sampleLimit:         sampleLimit,
+		sketch:              NewCountMinSketch(65536, 4),
+		doorkeeper:          NewBloomFilter(65536),
+		warmGhost:           make(map[string]uint8),
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) ShouldDemote(key string, stats *AccessStats, currentTier TierType) bool {
+	if stats == nil {
+		return false
+	}
+
+	switch currentTier {
+	case TierHot:
+		idle := time.Since(time.Unix(0, stats.LastAccessTime))
+		if idle <= p.cfg.HotIdleThreshold {
+			return false
+		}
+
+		frequency := p.estimateFrequency(key, stats)
+		if frequency <= p.windowAdmissionFreq {
+			return true
+		}
+		if frequency < p.protectedMinFreq {
+			return true
+		}
+		return false
+	case TierWarm:
+		return p.utilityScore(stats) <= p.cfg.WarmToColdDemoteThreshold
+	default:
+		return false
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) ShouldPromote(key string, stats *AccessStats, currentTier TierType) bool {
+	if stats == nil {
+		return false
+	}
+
+	switch currentTier {
+	case TierWarm:
+		return p.estimateFrequency(key, stats) >= p.protectedMinFreq
+	case TierCold:
+		return p.estimateFrequency(key, stats) >= p.protectedMinFreq
+	default:
+		return false
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) GetTargetTier(key string, stats *AccessStats) TierType {
+	if stats == nil {
+		return TierHot
+	}
+	if p.ShouldPromote(key, stats, TierWarm) {
+		return TierHot
+	}
+	if p.ShouldDemote(key, stats, TierWarm) {
+		return TierCold
+	}
+	return TierWarm
+}
+
+func (p *WTinyLFUCostAwarePolicy) RecordAccess(key string, tier TierType) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if key == "" {
+		return
+	}
+
+	if p.doorkeeper.Contains(key) {
+		p.sketch.Increment(key)
+	} else {
+		p.doorkeeper.Add(key)
+	}
+
+	if tier == TierWarm || tier == TierCold {
+		if _, ok := p.warmGhost[key]; ok {
+			p.warmGhost[key] = p.sketch.Estimate(key)
+		}
+	}
+
+	p.sampleCount++
+	if p.sampleCount >= p.sampleLimit {
+		p.sampleCount = 0
+		p.sketch.Reset()
+		p.doorkeeper.Reset()
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) RecordWrite(key string, tier TierType) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if key == "" {
+		return
+	}
+	if !p.doorkeeper.Contains(key) {
+		p.doorkeeper.Add(key)
+	} else {
+		p.sketch.Increment(key)
+	}
+	if tier == TierHot {
+		delete(p.warmGhost, key)
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) RecordMove(key string, from, to TierType) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if key == "" {
+		return
+	}
+
+	if from == TierHot && to == TierWarm {
+		p.warmGhost[key] = p.sketch.Estimate(key)
+		return
+	}
+	if from == TierWarm && to == TierHot {
+		delete(p.warmGhost, key)
+	}
+}
+
+func (p *WTinyLFUCostAwarePolicy) estimateFrequency(key string, stats *AccessStats) uint8 {
+	if stats == nil {
+		return 0
+	}
+	p.mu.Lock()
+	estimate := p.sketch.Estimate(key)
+	p.mu.Unlock()
+	if estimate == 0 {
+		if stats.AccessCount > 255 {
+			return 255
+		}
+		return uint8(stats.AccessCount)
+	}
+	return estimate
+}
+
+func (p *WTinyLFUCostAwarePolicy) utilityScore(stats *AccessStats) float64 {
+	access := math.Log1p(float64(stats.AccessCount))
+	idleHours := time.Since(time.Unix(0, stats.LastAccessTime)).Hours()
+	if idleHours < 0 {
+		idleHours = 0
+	}
+
+	writeAgeHours := time.Since(time.Unix(0, stats.WriteTime)).Hours()
+	if writeAgeHours < 0 {
+		writeAgeHours = 0
+	}
+	writePenalty := 1.0 / (1.0 + writeAgeHours)
+
+	sizeKB := float64(stats.Size) / 1024.0
+
+	return p.cfg.CostAccessWeight*access -
+		p.cfg.CostRecencyWeight*idleHours -
+		p.cfg.CostSizePenaltyWeight*sizeKB -
+		p.cfg.CostWritePenaltyWeight*writePenalty
 }
 
 // =============== W-TinyLFU Policy (Advanced) ===============

@@ -15,6 +15,7 @@ type mockProvider struct {
 	nodeID         string
 	nodes          []NodeInfo
 	slotMap        [16384]string
+	slotReplicas   map[uint16]SlotReplicaSet
 	migratingSlots map[uint16]MigrationState
 	currentEpoch   uint64
 	myEpoch        uint64
@@ -39,6 +40,19 @@ func (m *mockProvider) GetSlotMap() [16384]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.slotMap
+}
+
+func (m *mockProvider) GetSlotReplicationState() map[uint16]SlotReplicaSet {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uint16]SlotReplicaSet, len(m.slotReplicas))
+	for k, v := range m.slotReplicas {
+		replicas := make([]SlotReplica, len(v.Replicas))
+		copy(replicas, v.Replicas)
+		v.Replicas = replicas
+		result[k] = v
+	}
+	return result
 }
 
 func (m *mockProvider) GetMigratingSlots() map[uint16]MigrationState {
@@ -70,6 +84,7 @@ func (m *mockProvider) RestoreState(state *PersistentState) error {
 	m.nodeID = state.NodeID
 	m.nodes = state.Nodes
 	m.slotMap = state.SlotMap
+	m.slotReplicas = state.SlotReplicas
 	m.migratingSlots = state.MigratingSlots
 	m.currentEpoch = state.CurrentEpoch
 	m.myEpoch = state.MyEpoch

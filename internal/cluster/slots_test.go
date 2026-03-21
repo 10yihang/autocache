@@ -126,3 +126,124 @@ func TestSlotManager_GetClusterSlots(t *testing.T) {
 		t.Errorf("should have 3 ranges, got %d", len(ranges))
 	}
 }
+
+func TestSlotManager_AssignSlotSetsPrimary(t *testing.T) {
+	sm := NewSlotManager()
+
+	if err := sm.AssignSlot(7, "node1"); err != nil {
+		t.Fatalf("AssignSlot failed: %v", err)
+	}
+
+	info := sm.GetSlotInfo(7)
+	if info == nil {
+		t.Fatal("GetSlotInfo returned nil")
+	}
+	if info.PrimaryID != "node1" {
+		t.Fatalf("PrimaryID = %q, want %q", info.PrimaryID, "node1")
+	}
+	if info.ConfigEpoch != 0 {
+		t.Fatalf("ConfigEpoch = %d, want 0", info.ConfigEpoch)
+	}
+	if info.NextLSN != 0 {
+		t.Fatalf("NextLSN = %d, want 0", info.NextLSN)
+	}
+}
+
+func TestSlotManager_ConfigureReplication(t *testing.T) {
+	sm := NewSlotManager()
+
+	if err := sm.AssignSlot(9, "node1"); err != nil {
+		t.Fatalf("AssignSlot failed: %v", err)
+	}
+	if err := sm.ConfigureReplication(9, "node1", []string{"node2", "node3"}, 3); err != nil {
+		t.Fatalf("ConfigureReplication failed: %v", err)
+	}
+
+	info := sm.GetSlotInfo(9)
+	if info.PrimaryID != "node1" {
+		t.Fatalf("PrimaryID = %q, want %q", info.PrimaryID, "node1")
+	}
+	if info.ConfigEpoch != 3 {
+		t.Fatalf("ConfigEpoch = %d, want 3", info.ConfigEpoch)
+	}
+	if len(info.Replicas) != 2 {
+		t.Fatalf("replica count = %d, want 2", len(info.Replicas))
+	}
+	if info.Replicas[0].NodeID != "node2" || info.Replicas[1].NodeID != "node3" {
+		t.Fatalf("replicas = %#v, want node2,node3", info.Replicas)
+	}
+}
+
+func TestSlotManager_AllocateLSNAndTrackReplicaAck(t *testing.T) {
+	sm := NewSlotManager()
+
+	if err := sm.AssignSlot(11, "node1"); err != nil {
+		t.Fatalf("AssignSlot failed: %v", err)
+	}
+	if err := sm.ConfigureReplication(11, "node1", []string{"node2"}, 2); err != nil {
+		t.Fatalf("ConfigureReplication failed: %v", err)
+	}
+
+	epoch, lsn, err := sm.AllocateLSN(11)
+	if err != nil {
+		t.Fatalf("AllocateLSN failed: %v", err)
+	}
+	if epoch != 2 || lsn != 1 {
+		t.Fatalf("first allocation = (%d,%d), want (2,1)", epoch, lsn)
+	}
+
+	_, lsn, err = sm.AllocateLSN(11)
+	if err != nil {
+		t.Fatalf("AllocateLSN second call failed: %v", err)
+	}
+	if lsn != 2 {
+		t.Fatalf("second lsn = %d, want 2", lsn)
+	}
+
+	if err := sm.UpdateReplicaLSN(11, "node2", 2); err != nil {
+		t.Fatalf("UpdateReplicaLSN failed: %v", err)
+	}
+
+	info := sm.GetSlotInfo(11)
+	if info.Replicas[0].MatchLSN != 2 {
+		t.Fatalf("replica MatchLSN = %d, want 2", info.Replicas[0].MatchLSN)
+	}
+}
+
+func TestSlotManager_PromoteReplica(t *testing.T) {
+	sm := NewSlotManager()
+
+	if err := sm.AssignSlot(13, "node1"); err != nil {
+		t.Fatalf("AssignSlot failed: %v", err)
+	}
+	if err := sm.ConfigureReplication(13, "node1", []string{"node2", "node3"}, 4); err != nil {
+		t.Fatalf("ConfigureReplication failed: %v", err)
+	}
+	if err := sm.UpdateReplicaLSN(13, "node3", 8); err != nil {
+		t.Fatalf("UpdateReplicaLSN failed: %v", err)
+	}
+
+	if err := sm.PromoteReplica(13, "node3"); err != nil {
+		t.Fatalf("PromoteReplica failed: %v", err)
+	}
+
+	info := sm.GetSlotInfo(13)
+	if info.PrimaryID != "node3" {
+		t.Fatalf("PrimaryID = %q, want %q", info.PrimaryID, "node3")
+	}
+	if info.NodeID != "node3" {
+		t.Fatalf("NodeID = %q, want %q", info.NodeID, "node3")
+	}
+	if info.ConfigEpoch != 5 {
+		t.Fatalf("ConfigEpoch = %d, want 5", info.ConfigEpoch)
+	}
+	foundOldPrimary := false
+	for _, replica := range info.Replicas {
+		if replica.NodeID == "node1" {
+			foundOldPrimary = true
+		}
+	}
+	if !foundOldPrimary {
+		t.Fatal("expected old primary to remain in replica set after promotion")
+	}
+}

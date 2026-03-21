@@ -118,6 +118,7 @@ func (n *GossipNode) Clone() *GossipNode {
 type SlotAssigner interface {
 	GetNodeSlots(nodeID string) []uint16
 	GetSlotNode(slot uint16) string
+	GetSlotConfigEpoch(slot uint16) uint64
 	AssignSlot(slot uint16, nodeID string) error
 }
 
@@ -127,6 +128,9 @@ type Gossip struct {
 
 	nodes   map[string]*GossipNode
 	nodesMu sync.RWMutex
+
+	slotEpochMu sync.RWMutex
+	slotEpochs  map[uint16]uint64
 
 	currentEpoch uint64
 	listener     net.Listener
@@ -144,11 +148,12 @@ func NewGossip(self *GossipNode, slots SlotAssigner) *Gossip {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	g := &Gossip{
-		self:   self,
-		nodes:  make(map[string]*GossipNode),
-		slots:  slots,
-		ctx:    ctx,
-		cancel: cancel,
+		self:       self,
+		nodes:      make(map[string]*GossipNode),
+		slots:      slots,
+		slotEpochs: make(map[uint16]uint64),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	g.nodes[self.ID] = self
@@ -352,12 +357,21 @@ func (g *Gossip) processNodeInfo(info *NodeInfo) {
 	if len(info.Slots) > 0 && isMaster {
 		slots := BytesToSlots(info.Slots)
 		for _, slot := range slots {
+			if !g.canApplySlotOwnership(slot, info.ConfigEpoch) {
+				continue
+			}
 			currentOwner := g.slots.GetSlotNode(slot)
 			if currentOwner != node.ID {
-				g.slots.AssignSlot(slot, node.ID)
+				if err := g.slots.AssignSlot(slot, node.ID); err != nil {
+					log.Printf("Failed to assign slot %d to %s: %v", slot, node.ID, err)
+					continue
+				}
+				g.recordSlotEpoch(slot, info.ConfigEpoch)
 				if g.onSlotChange != nil {
 					go g.onSlotChange(slot, node.ID)
 				}
+			} else {
+				g.recordSlotEpoch(slot, info.ConfigEpoch)
 			}
 		}
 	}
@@ -537,23 +551,36 @@ func (g *Gossip) broadcastFail(failNodeID string) {
 }
 
 func (g *Gossip) selfNodeInfo() *NodeInfo {
+	g.self.mu.RLock()
+	selfRole := g.self.Role
+	selfMasterID := g.self.MasterID
+	selfID := g.self.ID
+	selfIP := g.self.IP
+	selfPort := g.self.Port
+	selfClusterPort := g.self.ClusterPort
+	g.self.mu.RUnlock()
+
+	g.nodesMu.RLock()
+	currentEpoch := g.currentEpoch
+	g.nodesMu.RUnlock()
+
 	var flags uint16
-	if g.self.Role == NodeRoleMaster {
+	if selfRole == NodeRoleMaster {
 		flags |= NodeFlagMaster
 	} else {
 		flags |= NodeFlagReplica
 	}
 
-	slots := g.slots.GetNodeSlots(g.self.ID)
+	slots := g.slots.GetNodeSlots(selfID)
 
 	return &NodeInfo{
-		ID:          g.self.ID,
-		IP:          g.self.IP,
-		Port:        g.self.Port,
-		ClusterPort: g.self.ClusterPort,
+		ID:          selfID,
+		IP:          selfIP,
+		Port:        selfPort,
+		ClusterPort: selfClusterPort,
 		Flags:       flags,
-		MasterID:    g.self.MasterID,
-		ConfigEpoch: g.currentEpoch,
+		MasterID:    selfMasterID,
+		ConfigEpoch: currentEpoch,
 		Slots:       SlotsToBytes(slots),
 	}
 }
@@ -591,6 +618,8 @@ func (g *Gossip) randomGossipNodes() []*NodeInfo {
 			MasterID:    node.MasterID,
 			PingSent:    node.PingSent,
 			PongRecv:    node.PongReceived,
+			ConfigEpoch: g.currentEpoch,
+			Slots:       SlotsToBytes(g.slots.GetNodeSlots(node.ID)),
 		})
 		node.mu.RUnlock()
 	}
@@ -637,6 +666,127 @@ func (g *Gossip) GetNode(id string) *GossipNode {
 		return node.Clone()
 	}
 	return nil
+}
+
+func (g *Gossip) BroadcastSlotOwnership(slot uint16, ownerID string) error {
+	g.nodesMu.RLock()
+	owner, ok := g.nodes[ownerID]
+	g.nodesMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("owner node %s not found", ownerID)
+	}
+
+	owner.mu.RLock()
+	ownerInfo := &NodeInfo{
+		ID:          owner.ID,
+		IP:          owner.IP,
+		Port:        owner.Port,
+		ClusterPort: owner.ClusterPort,
+		Flags:       NodeFlagMaster,
+		MasterID:    "",
+		ConfigEpoch: g.slotEpoch(slot),
+	}
+	owner.mu.RUnlock()
+
+	slots := g.slots.GetNodeSlots(ownerID)
+	if !hasSlot(slots, slot) {
+		slots = append(slots, slot)
+	}
+	ownerInfo.Slots = SlotsToBytes(slots)
+
+	return g.broadcastNodeInfo(ownerInfo)
+}
+
+func (g *Gossip) broadcastNodeInfo(info *NodeInfo) error {
+	g.nodesMu.RLock()
+	nodes := make([]*GossipNode, 0, len(g.nodes))
+	for _, node := range g.nodes {
+		if node.ID == g.self.ID {
+			continue
+		}
+		node.mu.RLock()
+		state := node.State
+		node.mu.RUnlock()
+		if state == NodeStateConnected {
+			nodes = append(nodes, node)
+		}
+	}
+	g.nodesMu.RUnlock()
+
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	msg := NewPingMessage(g.self.ID, g.selfNodeInfo(), []*NodeInfo{info})
+	data, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+
+	var firstErr error
+	for _, node := range nodes {
+		conn, dialErr := net.DialTimeout("tcp", node.ClusterAddr(), 2*time.Second)
+		if dialErr != nil {
+			if firstErr == nil {
+				firstErr = dialErr
+			}
+			continue
+		}
+		if writeErr := g.writeMessage(conn, data); writeErr != nil && firstErr == nil {
+			firstErr = writeErr
+		}
+		_ = conn.Close()
+	}
+
+	return firstErr
+}
+
+func hasSlot(slots []uint16, target uint16) bool {
+	for _, slot := range slots {
+		if slot == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gossip) SetCurrentEpoch(epoch uint64) {
+	g.nodesMu.Lock()
+	g.currentEpoch = epoch
+	g.nodesMu.Unlock()
+}
+
+func (g *Gossip) slotEpoch(slot uint16) uint64 {
+	epoch := g.slots.GetSlotConfigEpoch(slot)
+	if epoch > 0 {
+		g.recordSlotEpoch(slot, epoch)
+		return epoch
+	}
+	g.nodesMu.RLock()
+	currentEpoch := g.currentEpoch
+	g.nodesMu.RUnlock()
+	return currentEpoch
+}
+
+func (g *Gossip) canApplySlotOwnership(slot uint16, incomingEpoch uint64) bool {
+	g.slotEpochMu.RLock()
+	seenEpoch := g.slotEpochs[slot]
+	g.slotEpochMu.RUnlock()
+	if assignedEpoch := g.slots.GetSlotConfigEpoch(slot); assignedEpoch > seenEpoch {
+		seenEpoch = assignedEpoch
+	}
+	if incomingEpoch == 0 {
+		return seenEpoch == 0
+	}
+	return incomingEpoch >= seenEpoch
+}
+
+func (g *Gossip) recordSlotEpoch(slot uint16, epoch uint64) {
+	g.slotEpochMu.Lock()
+	if epoch >= g.slotEpochs[slot] {
+		g.slotEpochs[slot] = epoch
+	}
+	g.slotEpochMu.Unlock()
 }
 
 func (g *Gossip) SetEventHandlers(onJoin, onLeave func(*GossipNode), onSlotChange func(uint16, string)) {

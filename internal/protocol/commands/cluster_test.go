@@ -339,3 +339,35 @@ func TestSortSlots(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterFailoverPromotesBestReplica(t *testing.T) {
+	handler := newTestClusterHandler(t)
+	conn := &mockConn{}
+
+	selfID := handler.cluster.GetNodeID()
+	slot := uint16(42)
+
+	if err := handler.cluster.GetSlotManager().AssignSlot(slot, "node-primary"); err != nil {
+		t.Fatalf("AssignSlot failed: %v", err)
+	}
+	if err := handler.cluster.GetSlotManager().ConfigureReplication(slot, "node-primary", []string{selfID, "node-r2"}, 5); err != nil {
+		t.Fatalf("ConfigureReplication failed: %v", err)
+	}
+	if err := handler.cluster.GetSlotManager().UpdateReplicaLSN(slot, selfID, 99); err != nil {
+		t.Fatalf("UpdateReplicaLSN self failed: %v", err)
+	}
+	if err := handler.cluster.GetSlotManager().UpdateReplicaLSN(slot, "node-r2", 88); err != nil {
+		t.Fatalf("UpdateReplicaLSN node-r2 failed: %v", err)
+	}
+
+	handler.HandleCluster(conn, [][]byte{[]byte("FAILOVER"), []byte("42")})
+
+	if strings.HasPrefix(conn.response, "-") {
+		t.Fatalf("expected non-error response, got %q", conn.response)
+	}
+
+	info := handler.cluster.GetSlotManager().GetSlotInfo(slot)
+	if info.PrimaryID != selfID {
+		t.Fatalf("primary = %s, want %s", info.PrimaryID, selfID)
+	}
+}

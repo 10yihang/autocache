@@ -7,6 +7,7 @@ import (
 
 	"github.com/10yihang/autocache/internal/cluster/gossip"
 	"github.com/10yihang/autocache/internal/cluster/hash"
+	"github.com/10yihang/autocache/internal/cluster/replication"
 	"github.com/10yihang/autocache/internal/cluster/state"
 )
 
@@ -37,6 +38,7 @@ type Cluster struct {
 	gossip       *gossip.Gossip
 	state        ClusterState
 	stateManager *state.StateManager
+	replication  *replication.Manager
 	currentEpoch uint64
 	myEpoch      uint64
 	mu           sync.RWMutex
@@ -73,6 +75,9 @@ func NewCluster(cfg *Config, stateManager *state.StateManager) (*Cluster, error)
 		state:        ClusterStateDown,
 		stateManager: stateManager,
 	}
+	c.replication = replication.NewManager(replication.NewLogStore(1024), slots.AllocateLSN)
+	c.replication.SetReplicaResolver(c.replicationTargetsForSlot)
+	c.replication.SetReplicaLSNUpdater(slots.UpdateReplicaLSN)
 
 	if stateManager != nil {
 		stateManager.SetProvider(c)
@@ -91,6 +96,7 @@ func NewCluster(cfg *Config, stateManager *state.StateManager) (*Cluster, error)
 
 	c.gossip = gossip.NewGossip(gossipNode, slots)
 	c.gossip.SetEventHandlers(c.onNodeJoin, c.onNodeLeave, c.onSlotChange)
+	c.gossip.SetCurrentEpoch(c.currentEpoch)
 
 	return c, nil
 }
@@ -111,6 +117,9 @@ func (c *Cluster) Start(seeds []string) error {
 }
 
 func (c *Cluster) Stop() error {
+	if c.replication != nil {
+		c.replication.Close()
+	}
 	return c.gossip.Stop()
 }
 
@@ -212,8 +221,8 @@ func (c *Cluster) GetClusterInfo() map[string]interface{} {
 		"cluster_slots_ok":       c.slots.CountAssigned(),
 		"cluster_known_nodes":    len(nodes),
 		"cluster_size":           masterCount,
-		"cluster_current_epoch":  0,
-		"cluster_my_epoch":       0,
+		"cluster_current_epoch":  c.GetCurrentEpoch(),
+		"cluster_my_epoch":       c.GetMyEpoch(),
 	}
 }
 
@@ -256,6 +265,34 @@ func (c *Cluster) GetMigratingSlots() map[uint16]state.MigrationState {
 	return c.slots.GetMigratingSlots()
 }
 
+func (c *Cluster) GetSlotReplicationState() map[uint16]state.SlotReplicaSet {
+	return c.slots.GetSlotReplicationState()
+}
+
+func (c *Cluster) GetReplicationManager() *replication.Manager {
+	return c.replication
+}
+
+func (c *Cluster) replicationTargetsForSlot(slot uint16) []replication.PeerTarget {
+	info := c.slots.GetSlotInfo(slot)
+	if info == nil || len(info.Replicas) == 0 {
+		return nil
+	}
+
+	targets := make([]replication.PeerTarget, 0, len(info.Replicas))
+	for _, replica := range info.Replicas {
+		node := c.gossip.GetNode(replica.NodeID)
+		if node == nil {
+			continue
+		}
+		targets = append(targets, replication.PeerTarget{
+			NodeID: replica.NodeID,
+			Addr:   node.Addr(),
+		})
+	}
+	return targets
+}
+
 func (c *Cluster) GetCurrentEpoch() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -273,6 +310,7 @@ func (c *Cluster) IncrementEpoch() uint64 {
 	c.currentEpoch++
 	epoch := c.currentEpoch
 	c.mu.Unlock()
+	c.gossip.SetCurrentEpoch(epoch)
 
 	if c.stateManager != nil {
 		c.stateManager.MarkDirty()
@@ -285,9 +323,37 @@ func (c *Cluster) RestoreState(ps *state.PersistentState) error {
 	c.currentEpoch = ps.CurrentEpoch
 	c.myEpoch = ps.MyEpoch
 	c.mu.Unlock()
+	c.gossip.SetCurrentEpoch(ps.CurrentEpoch)
 
-	c.slots.RestoreFromState(ps.SlotMap, ps.MigratingSlots)
+	c.slots.RestoreFromState(ps.SlotMap, ps.MigratingSlots, ps.SlotReplicas)
 	return nil
+}
+
+func (c *Cluster) CanAcceptWrite(key string) bool {
+	slot := hash.KeySlot(key)
+	return c.CanAcceptWriteForSlot(slot)
+}
+
+func (c *Cluster) CanAcceptWriteForSlot(slot uint16) bool {
+	info := c.slots.GetSlotInfo(slot)
+	if info == nil {
+		return true
+	}
+	primaryID := info.PrimaryID
+	if primaryID == "" {
+		primaryID = info.NodeID
+	}
+	if primaryID == "" {
+		return true
+	}
+	return primaryID == c.self.ID
+}
+
+func (c *Cluster) BroadcastSlotOwnershipChange(slot uint16, newPrimary string) error {
+	if c == nil || c.gossip == nil {
+		return fmt.Errorf("cluster gossip not configured")
+	}
+	return c.gossip.BroadcastSlotOwnership(slot, newPrimary)
 }
 
 func (c *Cluster) onNodeJoin(node *gossip.GossipNode) {

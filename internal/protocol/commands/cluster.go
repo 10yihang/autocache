@@ -8,6 +8,7 @@ import (
 	"github.com/tidwall/redcon"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	"github.com/10yihang/autocache/internal/cluster/failover"
 	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/pkg/bytes"
 	"github.com/10yihang/autocache/pkg/protocolbuf"
@@ -20,12 +21,13 @@ type SlotKeyQuerier interface {
 }
 
 type ClusterHandler struct {
-	cluster *cluster.Cluster
-	engine  SlotKeyQuerier
+	cluster  *cluster.Cluster
+	engine   SlotKeyQuerier
+	failover *failover.Manager
 }
 
 func NewClusterHandler(c *cluster.Cluster, engine SlotKeyQuerier) *ClusterHandler {
-	return &ClusterHandler{cluster: c, engine: engine}
+	return &ClusterHandler{cluster: c, engine: engine, failover: failover.NewManagerForCluster(c)}
 }
 
 func (h *ClusterHandler) HandleCluster(conn redcon.Conn, args [][]byte) {
@@ -59,9 +61,36 @@ func (h *ClusterHandler) HandleCluster(conn redcon.Conn, args [][]byte) {
 		h.clusterGetKeysInSlot(conn, args[1:])
 	case "COUNTKEYSINSLOT":
 		h.clusterCountKeysInSlot(conn, args[1:])
+	case "PSYNC":
+		h.clusterPSync(conn, args[1:])
+	case "FAILOVER":
+		h.clusterFailover(conn, args[1:])
 	default:
 		conn.WriteError("ERR unknown subcommand '" + subcmd + "'")
 	}
+}
+
+func (h *ClusterHandler) clusterFailover(conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'cluster failover' command")
+		return
+	}
+
+	slot, err := strconv.ParseUint(bytes.BytesToString(args[0]), 10, 16)
+	if err != nil || slot >= hash.SlotCount {
+		conn.WriteError("ERR Invalid slot")
+		return
+	}
+
+	if h.failover == nil {
+		h.failover = failover.NewManagerForCluster(h.cluster)
+	}
+	promoted, err := h.failover.PromoteBestReplica(uint16(slot))
+	if err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
+	conn.WriteBulkString(promoted)
 }
 
 func (h *ClusterHandler) clusterInfo(conn redcon.Conn) {
@@ -364,6 +393,65 @@ func (h *ClusterHandler) clusterCountKeysInSlot(conn redcon.Conn, args [][]byte)
 
 	count := h.engine.CountKeysInSlot(uint16(slot))
 	conn.WriteInt(count)
+}
+
+func (h *ClusterHandler) clusterPSync(conn redcon.Conn, args [][]byte) {
+	if len(args) != 3 {
+		conn.WriteError("ERR wrong number of arguments for 'cluster psync' command")
+		return
+	}
+
+	slot, err := strconv.ParseUint(bytes.BytesToString(args[0]), 10, 16)
+	if err != nil || slot >= hash.SlotCount {
+		conn.WriteError("ERR Invalid slot")
+		return
+	}
+	epoch, err := strconv.ParseUint(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR Invalid epoch")
+		return
+	}
+	appliedLSN, err := strconv.ParseUint(bytes.BytesToString(args[2]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR Invalid lsn")
+		return
+	}
+
+	manager := h.cluster.GetReplicationManager()
+	if manager == nil {
+		conn.WriteError("ERR replication manager not configured")
+		return
+	}
+
+	info := h.cluster.GetSlotManager().GetSlotInfo(uint16(slot))
+	currentEpoch := uint64(0)
+	if info != nil {
+		currentEpoch = info.ConfigEpoch
+	}
+	if info == nil || info.ConfigEpoch != epoch {
+		snapshotLSN, _ := manager.SnapshotLSN(uint16(slot))
+		conn.WriteError(fmt.Sprintf("FULLRESYNC %d %d", currentEpoch, snapshotLSN))
+		return
+	}
+
+	ops, ok := manager.IncrementalOps(uint16(slot), appliedLSN)
+	if !ok {
+		snapshotLSN, _ := manager.SnapshotLSN(uint16(slot))
+		conn.WriteError(fmt.Sprintf("FULLRESYNC %d %d", currentEpoch, snapshotLSN))
+		return
+	}
+
+	conn.WriteArray(len(ops))
+	for _, op := range ops {
+		conn.WriteArray(7)
+		conn.WriteInt64(int64(op.Slot))
+		conn.WriteInt64(int64(op.Epoch))
+		conn.WriteInt64(int64(op.LSN))
+		conn.WriteBulkString(op.OpType)
+		conn.WriteBulkString(op.Key)
+		conn.WriteInt64(op.ExpireAtNs)
+		conn.WriteBulk(op.Payload)
+	}
 }
 
 func (h *ClusterHandler) CheckKeyRouting(key string) error {

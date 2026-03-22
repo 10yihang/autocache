@@ -53,6 +53,8 @@ export type AdminPasteListResponse = {
   }>
 }
 
+const pendingReadRequests = new Map<string, Promise<ReadPasteResponse>>()
+
 export function createPaste(payload: CreatePasteRequest) {
   return requestJSON<CreatePasteResponse>('/api/paste', {
     method: 'POST',
@@ -61,7 +63,16 @@ export function createPaste(payload: CreatePasteRequest) {
 }
 
 export function readPaste(code: string) {
-  return requestJSON<ReadPasteResponse>(`/api/paste/${code}`)
+  const cached = pendingReadRequests.get(code)
+  if (cached) {
+    return cached
+  }
+
+  const request = requestJSON<ReadPasteResponse>(`/api/paste/${code}`).finally(() => {
+    pendingReadRequests.delete(code)
+  })
+  pendingReadRequests.set(code, request)
+  return request
 }
 
 export function fetchAdminStats(token: string) {

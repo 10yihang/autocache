@@ -26,10 +26,17 @@ echo -e "${GREEN}Found ${POD_COUNT} nodes: ${PODS}${NC}"
 echo ""
 
 POD_IPS=()
+NODE_RANGES=()
+NODE_SET_RPS=()
+NODE_GET_RPS=()
 for pod in "${POD_ARRAY[@]}"; do
     ip=$(kubectl get pod -n ${NAMESPACE} ${pod} -o jsonpath='{.status.podIP}')
     POD_IPS+=("$ip")
 done
+
+cluster_info_raw=$(kubectl exec -n ${NAMESPACE} ${POD_ARRAY[0]} -- /autocache -cli CLUSTER INFO 2>/dev/null || true)
+cluster_state=$(printf '%s\n' "$cluster_info_raw" | grep 'cluster_state:' | cut -d: -f2 | tr -d '\r' || true)
+cluster_slots_assigned=$(printf '%s\n' "$cluster_info_raw" | grep 'cluster_slots_assigned:' | cut -d: -f2 | tr -d '\r' || true)
 
 slot_range_for_ip() {
     local ip=$1
@@ -68,7 +75,7 @@ find_tag_for_range() {
 }
 
 echo -e "${YELLOW}[1/4] Verifying cluster state...${NC}"
-kubectl exec -n ${NAMESPACE} ${POD_ARRAY[0]} -- /autocache -cli CLUSTER INFO 2>/dev/null | grep -E "cluster_state|cluster_slots_assigned|cluster_known_nodes" | tr -d '$'
+printf '%s\n' "$cluster_info_raw" | grep -E "cluster_state|cluster_slots_assigned|cluster_known_nodes" | tr -d '$'
 echo ""
 
 echo -e "${YELLOW}Waiting for benchmark pod...${NC}"
@@ -92,22 +99,27 @@ for i in "${!POD_ARRAY[@]}"; do
     start=${range%-*}
     end=${range#*-}
     tag=$(find_tag_for_range "$start" "$end")
+    NODE_RANGES[$i]="$range"
     
     echo -e "${GREEN}--- Node $i: ${pod} (${ip}) range=${range} tag=${tag} ---${NC}"
     
     echo -n "  SET: "
-    bench_rps "${NAMESPACE}" "${ip}" \
+    set_result=$(bench_rps "${NAMESPACE}" "${ip}" \
         -n $((REQUESTS / POD_COUNT)) \
         -c ${CLIENTS} \
         -q \
-        SET "${tag}:__rand_int__" __data__ || echo "failed"
+        SET "${tag}:__rand_int__" __data__)
+    printf '%s\n' "$set_result"
+    NODE_SET_RPS[$i]=$(printf '%s\n' "$set_result" | extract_rps)
     
     echo -n "  GET: "
-    bench_rps "${NAMESPACE}" "${ip}" \
+    get_result=$(bench_rps "${NAMESPACE}" "${ip}" \
         -n $((REQUESTS / POD_COUNT)) \
         -c ${CLIENTS} \
         -q \
-        GET "${tag}:__rand_int__" || echo "failed"
+        GET "${tag}:__rand_int__")
+    printf '%s\n' "$get_result"
+    NODE_GET_RPS[$i]=$(printf '%s\n' "$get_result" | extract_rps)
     echo ""
 done
 
@@ -196,6 +208,20 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Aggregate SET: ~${total_set_rps} req/s${NC}"
 echo -e "${GREEN}Aggregate GET: ~${total_get_rps} req/s${NC}"
 echo -e "${GREEN}========================================${NC}"
+
+node_rows=""
+for i in "${!POD_ARRAY[@]}"; do
+    row=$(printf 'Node %s|%s|%s|%s' "$i" "${NODE_RANGES[$i]:-N/A}" "${NODE_SET_RPS[$i]:-N/A}" "${NODE_GET_RPS[$i]:-N/A}")
+    if [ -z "$node_rows" ]; then
+        node_rows="$row"
+    else
+        node_rows="$node_rows
+$row"
+    fi
+done
+
+echo ""
+print_cluster_summary_table "${cluster_state:-unknown}" "${cluster_slots_assigned:-unknown}" "${POD_COUNT}" "${total_set_rps}" "${total_get_rps}" "$node_rows"
 
 echo ""
 echo -e "${YELLOW}[4/4] Full benchmark suite on single node...${NC}"

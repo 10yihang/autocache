@@ -1,0 +1,31 @@
+[Unit]
+Description=AutoCache RESP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autocache
+Group=autocache
+WorkingDirectory=/home/autocache
+Environment=AUTOCACHE_ADDR=:6379
+Environment=AUTOCACHE_METRICS_ADDR=:9121
+Environment=AUTOCACHE_DATA_DIR=/var/lib/autocache
+Environment=AUTOCACHE_CONFIG=/etc/autocache/autocache.conf
+Environment=AUTOCACHE_EXTRA_ARGS=
+EnvironmentFile=-/etc/default/autocache
+ExecStart=/bin/sh -lc 'exec /home/autocache/bin/autocache -addr "$AUTOCACHE_ADDR" -metrics-addr "$AUTOCACHE_METRICS_ADDR" -data-dir "$AUTOCACHE_DATA_DIR" -config "$AUTOCACHE_CONFIG" $AUTOCACHE_EXTRA_ARGS'
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/autocache
+StateDirectory=autocache
+RuntimeDirectory=autocache
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

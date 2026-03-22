@@ -173,3 +173,36 @@ print_bench_config() {
 print_section() {
   echo -e "${YELLOW}$1${NC}"
 }
+
+print_cluster_summary_table() {
+  local cluster_state=$1
+  local slots_assigned=$2
+  local node_count=$3
+  local total_set_rps=$4
+  local total_get_rps=$5
+  local node_rows=${6:-}
+
+  echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}║                     CLUSTER PERFORMANCE SUMMARY                         ║${NC}"
+  echo -e "${CYAN}╠══════════════════════╦═══════════════════════════════════════════════════╣${NC}"
+  printf "${CYAN}║${NC} %-20s ${CYAN}║${NC} %-41s ${CYAN}║${NC}\n" "cluster_state" "${cluster_state}"
+  printf "${CYAN}║${NC} %-20s ${CYAN}║${NC} %-41s ${CYAN}║${NC}\n" "cluster_slots" "${slots_assigned}"
+  printf "${CYAN}║${NC} %-20s ${CYAN}║${NC} %-41s ${CYAN}║${NC}\n" "cluster_nodes" "${node_count}"
+  printf "${CYAN}║${NC} %-20s ${CYAN}║${NC} %-41s ${CYAN}║${NC}\n" "Aggregate SET" "${total_set_rps} req/s"
+  printf "${CYAN}║${NC} %-20s ${CYAN}║${NC} %-41s ${CYAN}║${NC}\n" "Aggregate GET" "${total_get_rps} req/s"
+  echo -e "${CYAN}╠══════════════════════╩═══════════════════════════════════════════════════╣${NC}"
+  echo -e "${CYAN}║${NC} Node breakdown                                                      ${CYAN}║${NC}"
+  echo -e "${CYAN}╠════════════╦══════════════════╦══════════════════╦══════════════════════╣${NC}"
+  echo -e "${CYAN}║${NC} Node       ${CYAN}║${NC} Slot Range       ${CYAN}║${NC} SET req/s        ${CYAN}║${NC} GET req/s            ${CYAN}║${NC}"
+  echo -e "${CYAN}╠════════════╬══════════════════╬══════════════════╬══════════════════════╣${NC}"
+
+  if [ -n "${node_rows}" ]; then
+    while IFS='|' read -r node_label slot_range set_rps get_rps; do
+      [ -n "${node_label}" ] || continue
+      printf "${CYAN}║${NC} %-10s ${CYAN}║${NC} %-16s ${CYAN}║${NC} %16s ${CYAN}║${NC} %20s ${CYAN}║${NC}\n" \
+        "${node_label}" "${slot_range}" "${set_rps}" "${get_rps}"
+    done <<<"${node_rows}"
+  fi
+
+  echo -e "${CYAN}╚════════════╩══════════════════╩══════════════════╩══════════════════════╝${NC}"
+}

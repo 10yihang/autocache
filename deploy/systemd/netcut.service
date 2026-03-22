@@ -1,0 +1,27 @@
+[Unit]
+Description=Netcut application service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netcut
+Group=netcut
+WorkingDirectory=/home/netcut
+EnvironmentFile=-/etc/default/netcut
+ExecStart=/bin/bash -lc 'exec ${NETCUT_COMMAND:-/home/netcut/bin/netcut}'
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/netcut /var/log/netcut
+StateDirectory=netcut
+LogsDirectory=netcut
+RuntimeDirectory=netcut
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

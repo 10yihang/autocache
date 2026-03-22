@@ -1,0 +1,194 @@
+:root {
+  --bg: #f8f5ee;
+  --bg-panel: #fffdf8;
+  --bg-accent: #e7f4ef;
+  --text-main: #1f2a2d;
+  --text-subtle: #5f6d71;
+  --line: #d7d2c8;
+  --brand: #0f7b6c;
+  --brand-hover: #0a6256;
+  --danger: #ba3f34;
+  --shadow: 0 12px 30px rgba(37, 48, 58, 0.1);
+  font-family: "Source Sans 3", "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text-main);
+  background: radial-gradient(circle at top right, #eef6ea 0%, var(--bg) 50%, #f2efea 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  width: min(1080px, 100% - 2rem);
+  margin: 0 auto;
+  padding: 1.2rem 0 2rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.brand-block h1 {
+  margin: 0;
+  font-family: "Fraunces", "Times New Roman", serif;
+  font-size: clamp(1.8rem, 5vw, 2.8rem);
+}
+
+.kicker {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+  color: var(--brand);
+  font-size: 0.72rem;
+}
+
+.topnav {
+  display: flex;
+  gap: 0.8rem;
+}
+
+.topnav a {
+  text-decoration: none;
+  color: var(--text-main);
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+}
+
+.topnav a.active {
+  border-bottom-color: var(--brand);
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 1rem;
+}
+
+.intro-panel {
+  background: linear-gradient(150deg, #f2f7e8 0%, var(--bg-accent) 60%, #f8f6ef 100%);
+}
+
+.stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+label {
+  font-weight: 600;
+  display: grid;
+  gap: 0.35rem;
+}
+
+textarea,
+select,
+input {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  font-weight: 700;
+  background: var(--brand);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--brand-hover);
+}
+
+button:disabled {
+  opacity: 0.65;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.history-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.paste-content {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "IBM Plex Mono", Menlo, monospace;
+  background: #f7f4ec;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.muted {
+  color: var(--text-subtle);
+}
+
+.error-text {
+  color: var(--danger);
+  margin: 0;
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    width: min(1080px, 100% - 1rem);
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-grid,
+  .row,
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+}

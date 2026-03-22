@@ -28,6 +28,16 @@ import (
 
 type CommandFunc func(ctx context.Context, conn redcon.Conn, args [][]byte)
 
+type trackedConn struct {
+	redcon.Conn
+	hadError bool
+}
+
+func (c *trackedConn) WriteError(msg string) {
+	c.hadError = true
+	c.Conn.WriteError(msg)
+}
+
 type Handler struct {
 	engine         ProtocolEngine
 	commands       map[string]CommandFunc
@@ -200,8 +210,9 @@ func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes [
 		}
 	}
 
-	fn(ctx, conn, args)
-	record(true)
+	tracked := &trackedConn{Conn: conn}
+	fn(ctx, tracked, args)
+	record(!tracked.hadError)
 	clearAskingFlag(conn)
 }
 
@@ -266,8 +277,9 @@ func (h *Handler) Execute(ctx context.Context, conn redcon.Conn, cmd string, arg
 		}
 	}
 
-	fn(ctx, conn, args)
-	record(true)
+	tracked := &trackedConn{Conn: conn}
+	fn(ctx, tracked, args)
+	record(!tracked.hadError)
 	clearAskingFlag(conn)
 }
 

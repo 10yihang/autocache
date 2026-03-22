@@ -29,14 +29,17 @@ func NewHTTPHandler(service *PasteService, middleware *Middleware, _ HTTPHandler
 
 func (h *HTTPHandler) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/health", http.HandlerFunc(h.handleHealth))
-	mux.Handle("/api/paste", h.middleware.RateLimit("create", h.middleware.RequireJSONBody(http.HandlerFunc(h.handleCreatePaste), MaxContentBytes)))
-	mux.Handle("/api/paste/", h.middleware.RateLimit("read", http.HandlerFunc(h.handlePasteByCode)))
-	mux.Handle("/raw/", h.middleware.RateLimit("read", http.HandlerFunc(h.handleRawPaste)))
-	mux.Handle("/admin/stats", h.middleware.RequireAdmin(http.HandlerFunc(h.handleAdminStats)))
-	mux.Handle("/admin/pastes", h.middleware.RequireAdmin(http.HandlerFunc(h.handleAdminPastes)))
-	mux.Handle("/assets/", http.StripPrefix("/", http.FileServer(http.FS(h.staticFS))))
-	mux.Handle("/", http.HandlerFunc(h.handleSPA))
+	wrap := func(route string, handler http.Handler) http.Handler {
+		return instrumentHTTP(handler, route)
+	}
+	mux.Handle("/health", wrap("/health", http.HandlerFunc(h.handleHealth)))
+	mux.Handle("/api/paste", wrap("/api/paste", h.middleware.RequireJSONBody(http.HandlerFunc(h.handleCreatePaste), MaxContentBytes)))
+	mux.Handle("/api/paste/", wrap("/api/paste/:code", http.HandlerFunc(h.handlePasteByCode)))
+	mux.Handle("/raw/", wrap("/raw/:code", http.HandlerFunc(h.handleRawPaste)))
+	mux.Handle("/admin/stats", wrap("/admin/stats", h.middleware.RequireAdmin(http.HandlerFunc(h.handleAdminStats))))
+	mux.Handle("/admin/pastes", wrap("/admin/pastes", h.middleware.RequireAdmin(http.HandlerFunc(h.handleAdminPastes))))
+	mux.Handle("/assets/", wrap("/assets/*", http.StripPrefix("/", http.FileServer(http.FS(h.staticFS)))))
+	mux.Handle("/", wrap("spa", http.HandlerFunc(h.handleSPA)))
 	return mux
 }
 
@@ -125,6 +128,7 @@ func (h *HTTPHandler) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		Usage:      h.service.Stats(),
 		RateLimits: h.middleware.Stats(),
 	}
+	recordNetcutAccess("admin_stats")
 	writeJSON(w, http.StatusOK, stats)
 }
 
@@ -139,6 +143,7 @@ func (h *HTTPHandler) handleAdminPastes(w http.ResponseWriter, r *http.Request) 
 		h.writeServiceError(w, err)
 		return
 	}
+	recordNetcutAccess("admin_list")
 	writeJSON(w, http.StatusOK, list)
 }
 

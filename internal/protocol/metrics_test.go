@@ -31,8 +31,11 @@ func TestProtocol_RecordsCommandMetrics(t *testing.T) {
 	defer conn.Close()
 
 	beforeSet := testutil.ToFloat64(metrics2.CommandsTotal.WithLabelValues("SET", "success"))
+	beforeRequests := testutil.ToFloat64(metrics2.RequestsTotal.WithLabelValues("set", "success"))
 	beforeUnknown := testutil.ToFloat64(metrics2.CommandsTotal.WithLabelValues("UNKNOWN", "error"))
+	beforeUnknownRequests := testutil.ToFloat64(metrics2.RequestsTotal.WithLabelValues("other", "error"))
 	beforeGetHist := histogramSampleCount(t, "autocache_command_duration_seconds", "cmd", "GET")
+	beforeGetRequestHist := histogramSampleCount(t, "autocache_request_duration_seconds", "command", "get")
 
 	buf := make([]byte, 1024)
 	writeAndRead := func(cmd string) {
@@ -53,8 +56,11 @@ func TestProtocol_RecordsCommandMetrics(t *testing.T) {
 	writeAndRead("*1\r\n$7\r\nUNKNOWN\r\n")
 
 	afterSet := testutil.ToFloat64(metrics2.CommandsTotal.WithLabelValues("SET", "success"))
+	afterRequests := testutil.ToFloat64(metrics2.RequestsTotal.WithLabelValues("set", "success"))
 	afterUnknown := testutil.ToFloat64(metrics2.CommandsTotal.WithLabelValues("UNKNOWN", "error"))
+	afterUnknownRequests := testutil.ToFloat64(metrics2.RequestsTotal.WithLabelValues("other", "error"))
 	afterGetHist := histogramSampleCount(t, "autocache_command_duration_seconds", "cmd", "GET")
+	afterGetRequestHist := histogramSampleCount(t, "autocache_request_duration_seconds", "command", "get")
 
 	if afterSet != beforeSet+1 {
 		t.Fatalf("SET success counter = %v, want %v", afterSet, beforeSet+1)
@@ -62,8 +68,17 @@ func TestProtocol_RecordsCommandMetrics(t *testing.T) {
 	if afterUnknown != beforeUnknown+1 {
 		t.Fatalf("UNKNOWN error counter = %v, want %v", afterUnknown, beforeUnknown+1)
 	}
+	if afterRequests != beforeRequests+1 {
+		t.Fatalf("SET request counter = %v, want %v", afterRequests, beforeRequests+1)
+	}
+	if afterUnknownRequests != beforeUnknownRequests+1 {
+		t.Fatalf("UNKNOWN request counter = %v, want %v", afterUnknownRequests, beforeUnknownRequests+1)
+	}
 	if afterGetHist <= beforeGetHist {
 		t.Fatalf("GET histogram observations did not increase: before=%d after=%d", beforeGetHist, afterGetHist)
+	}
+	if afterGetRequestHist <= beforeGetRequestHist {
+		t.Fatalf("GET request histogram observations did not increase: before=%d after=%d", beforeGetRequestHist, afterGetRequestHist)
 	}
 }
 

@@ -136,6 +136,10 @@ func NewManager(cfg *Config, hotTier *memory.Store) (*Manager, error) {
 	}
 
 	m.migrator = NewMigrator(m)
+	metrics2.SetTierCapacity(TierHot.String(), cfg.HotTierCapacity)
+	metrics2.SetTierCapacity(TierWarm.String(), cfg.WarmTierCapacity)
+	metrics2.SetTierCapacity(TierCold.String(), cfg.ColdTierCapacity)
+	m.updateTierMetrics()
 
 	return m, nil
 }
@@ -228,6 +232,7 @@ func (m *Manager) Set(ctx context.Context, key string, value string, ttl time.Du
 
 	m.stats.RecordWrite(key, int64(len(value)))
 	m.recordPolicyWrite(key, TierHot)
+	m.updateTierMetrics()
 	return nil
 }
 
@@ -251,6 +256,7 @@ func (m *Manager) Del(ctx context.Context, keys ...string) (int64, error) {
 	for _, key := range keys {
 		m.stats.RecordDelete(key)
 	}
+	m.updateTierMetrics()
 
 	return count, nil
 }
@@ -522,14 +528,27 @@ func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *en
 	if m.policy.ShouldPromote(key, stats, TierWarm) {
 		ttl := entryTTL(entry)
 		go func() {
-			m.hotTier.Set(ctx, key, value, ttl)
+			start := time.Now()
+			metrics2.AddTieredMigrationInFlight(1)
+			defer metrics2.AddTieredMigrationInFlight(-1)
+			if err := m.hotTier.Set(ctx, key, value, ttl); err != nil {
+				metrics2.RecordTieredMigrationError("up", "storage_error")
+				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
+				return
+			}
 			if m.warmTier != nil {
-				m.warmTier.Del(ctx, key)
+				if _, err := m.warmTier.Del(ctx, key); err != nil {
+					metrics2.RecordTieredMigrationError("up", classifyMigrationError(err))
+					metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
+					return
+				}
 			}
 			m.stats.UpdateTier(key, TierHot)
 			m.recordPolicyMove(key, TierWarm, TierHot)
 			m.migrationsUp.Add(1)
 			metrics2.RecordTieredMigration("up")
+			m.updateTierMetrics()
+			metrics2.ObserveTieredMigrationDuration("up", time.Since(start), true)
 			// log.Printf("Promoted key %s from warm to hot tier", key)
 		}()
 	}
@@ -538,16 +557,29 @@ func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *en
 func (m *Manager) promoteFromCold(ctx context.Context, key, value string, entry *engine.Entry) {
 	ttl := entryTTL(entry)
 	go func() {
+		start := time.Now()
+		metrics2.AddTieredMigrationInFlight(1)
+		defer metrics2.AddTieredMigrationInFlight(-1)
 		if m.warmTier != nil {
-			m.warmTier.Set(ctx, key, value, ttl)
+			if err := m.warmTier.Set(ctx, key, value, ttl); err != nil {
+				metrics2.RecordTieredMigrationError("up", "storage_error")
+				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
+				return
+			}
 		}
 		if m.coldTier != nil {
-			m.coldTier.Del(ctx, key)
+			if _, err := m.coldTier.Del(ctx, key); err != nil {
+				metrics2.RecordTieredMigrationError("up", classifyMigrationError(err))
+				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
+				return
+			}
 		}
 		m.stats.UpdateTier(key, TierWarm)
 		m.recordPolicyMove(key, TierCold, TierWarm)
 		m.migrationsUp.Add(1)
 		metrics2.RecordTieredMigration("up")
+		m.updateTierMetrics()
+		metrics2.ObserveTieredMigrationDuration("up", time.Since(start), true)
 		// log.Printf("Promoted key %s from cold to warm tier", key)
 	}()
 }
@@ -616,10 +648,32 @@ func (m *Manager) GetStats() *TieredStats {
 		MigrationsUp:   m.migrationsUp.Load(),
 		MigrationsDown: m.migrationsDown.Load(),
 	}
-	metrics2.TieredKeys.WithLabelValues("hot").Set(float64(stats.HotTierKeys))
-	metrics2.TieredKeys.WithLabelValues("warm").Set(float64(stats.WarmTierKeys))
-	metrics2.TieredKeys.WithLabelValues("cold").Set(float64(stats.ColdTierKeys))
+	m.updateTierMetricsWithStats(stats)
 	return stats
+}
+
+func (m *Manager) updateTierMetrics() {
+	m.updateTierMetricsWithStats(&TieredStats{
+		HotTierKeys:  int64(len(m.stats.GetKeysByTier(TierHot))),
+		HotTierSize:  m.stats.GetSizeByTier(TierHot),
+		WarmTierKeys: int64(len(m.stats.GetKeysByTier(TierWarm))),
+		WarmTierSize: m.stats.GetSizeByTier(TierWarm),
+		ColdTierKeys: int64(len(m.stats.GetKeysByTier(TierCold))),
+		ColdTierSize: m.stats.GetSizeByTier(TierCold),
+	})
+}
+
+func (m *Manager) updateTierMetricsWithStats(stats *TieredStats) {
+	if stats == nil {
+		return
+	}
+	metrics2.TieredKeys.WithLabelValues(TierHot.String()).Set(float64(stats.HotTierKeys))
+	metrics2.TieredKeys.WithLabelValues(TierWarm.String()).Set(float64(stats.WarmTierKeys))
+	metrics2.TieredKeys.WithLabelValues(TierCold.String()).Set(float64(stats.ColdTierKeys))
+	metrics2.SetTieredBytes(TierHot.String(), stats.HotTierSize)
+	metrics2.SetTieredBytes(TierWarm.String(), stats.WarmTierSize)
+	metrics2.SetTieredBytes(TierCold.String(), stats.ColdTierSize)
+	metrics2.KeysTotal.Set(float64(stats.HotTierKeys + stats.WarmTierKeys + stats.ColdTierKeys))
 }
 
 // TieredStats holds stats

@@ -2,10 +2,12 @@ package tiered
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/10yihang/autocache/internal/engine"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
+	pkgerrors "github.com/10yihang/autocache/pkg/errors"
 )
 
 // Migrator handles data migration between tiers
@@ -38,6 +40,7 @@ func (m *Migrator) MigrationLoop() {
 // RunMigration executes a single migration run
 func (m *Migrator) RunMigration() {
 	ctx := context.Background()
+	metrics2.SetTieredMigrationPending(m.pendingMigrations())
 
 	// Hot -> Warm
 	hotKeys := m.manager.stats.GetKeysByTier(TierHot)
@@ -78,7 +81,38 @@ func (m *Migrator) RunMigration() {
 	}
 }
 
+func (m *Migrator) pendingMigrations() int {
+	pending := 0
+	for _, key := range m.manager.stats.GetKeysByTier(TierHot) {
+		stats := m.manager.stats.GetStats(key)
+		if stats != nil && m.manager.policy.ShouldDemote(key, stats, TierHot) {
+			pending++
+		}
+	}
+	if m.manager.coldTier != nil {
+		for _, key := range m.manager.stats.GetKeysByTier(TierWarm) {
+			stats := m.manager.stats.GetStats(key)
+			if stats != nil && m.manager.policy.ShouldDemote(key, stats, TierWarm) {
+				pending++
+			}
+		}
+	}
+	return pending
+}
+
 func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType) error {
+	direction := "down"
+	start := time.Now()
+	metrics2.AddTieredMigrationInFlight(1)
+	defer metrics2.AddTieredMigrationInFlight(-1)
+	defer func() {
+		if r := recover(); r != nil {
+			metrics2.RecordTieredMigrationError(direction, "panic")
+			metrics2.ObserveTieredMigrationDuration(direction, time.Since(start), false)
+			panic(r)
+		}
+	}()
+
 	var value interface{}
 	var err error
 	var ttl time.Duration
@@ -103,6 +137,8 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 	}
 
 	if err != nil {
+		metrics2.RecordTieredMigrationError(direction, classifyMigrationError(err))
+		metrics2.ObserveTieredMigrationDuration(direction, time.Since(start), false)
 		return err
 	}
 
@@ -123,6 +159,8 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 	}
 
 	if err != nil {
+		metrics2.RecordTieredMigrationError(direction, classifyMigrationError(err))
+		metrics2.ObserveTieredMigrationDuration(direction, time.Since(start), false)
 		return err
 	}
 
@@ -142,5 +180,17 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 	}
 	m.manager.stats.UpdateTier(key, to)
 	m.manager.recordPolicyMove(key, from, to)
+	m.manager.updateTierMetrics()
+	metrics2.ObserveTieredMigrationDuration(direction, time.Since(start), true)
 	return nil
+}
+
+func classifyMigrationError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, engine.ErrKeyNotFound) || errors.Is(err, pkgerrors.ErrKeyNotFound) {
+		return "not_found"
+	}
+	return "storage_error"
 }

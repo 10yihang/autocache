@@ -20,6 +20,15 @@ var (
 		[]string{"cmd", "status"}, // cmd: get/set/del, status: success/error
 	)
 
+	RequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "requests_total",
+			Help:      "Total number of requests processed",
+		},
+		[]string{"command", "result"},
+	)
+
 	// CommandDuration measures command latency
 	CommandDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -29,6 +38,16 @@ var (
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .05, .1, .5, 1},
 		},
 		[]string{"cmd"},
+	)
+
+	RequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "request_duration_seconds",
+			Help:      "Request latency in seconds",
+			Buckets:   []float64{.0001, .0005, .001, .005, .01, .05, .1, .5, 1},
+		},
+		[]string{"command"},
 	)
 
 	// CacheHits counts cache hits
@@ -87,6 +106,24 @@ var (
 		[]string{"tier"}, // hot/warm/cold
 	)
 
+	TieredBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "tiered_bytes",
+			Help:      "Number of bytes stored in each tier",
+		},
+		[]string{"tier"},
+	)
+
+	TierCapacityBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "tier_capacity_bytes",
+			Help:      "Configured capacity in bytes for each tier",
+		},
+		[]string{"tier"},
+	)
+
 	// TieredMigrations tracks migrations
 	TieredMigrations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -95,6 +132,41 @@ var (
 			Help:      "Total number of tier migrations",
 		},
 		[]string{"direction"}, // promote/demote
+	)
+
+	TieredMigrationPending = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "tiered_migration_pending",
+			Help:      "Number of keys currently pending migration",
+		},
+	)
+
+	TieredMigrationInFlight = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "tiered_migration_in_flight",
+			Help:      "Number of migrations currently in flight",
+		},
+	)
+
+	TieredMigrationDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "tiered_migration_duration_seconds",
+			Help:      "Duration of tier migrations in seconds",
+			Buckets:   []float64{.0005, .001, .005, .01, .05, .1, .25, .5, 1, 5},
+		},
+		[]string{"direction", "result"},
+	)
+
+	TieredMigrationErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "tiered_migration_errors_total",
+			Help:      "Total number of tier migration errors",
+		},
+		[]string{"direction", "error_type"},
 	)
 
 	// Info exposes build info

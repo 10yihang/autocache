@@ -110,6 +110,7 @@ func (s *PasteService) Create(ctx context.Context, request CreatePasteRequest) (
 	}
 
 	s.stats.pastesCreatedTotal.Add(1)
+	recordNetcutAccess("paste_create")
 
 	paste := Paste{
 		Code:    code,
@@ -179,6 +180,7 @@ func (s *PasteService) Get(ctx context.Context, code string) (ReadPasteResponse,
 	}
 
 	s.stats.pastesReadTotal.Add(1)
+	recordNetcutAccess("paste_read")
 
 	return ReadPasteResponse{Paste: paste}, nil
 }

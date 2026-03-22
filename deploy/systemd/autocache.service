@@ -5,16 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=autocache
-Group=autocache
+User=root
+Group=root
 WorkingDirectory=/home/autocache
 Environment=AUTOCACHE_ADDR=:6379
 Environment=AUTOCACHE_METRICS_ADDR=:9121
 Environment=AUTOCACHE_DATA_DIR=/home/autocache/data
-Environment=AUTOCACHE_CONFIG=/home/autocache/autocache.conf
+Environment=AUTOCACHE_CONFIG=
 Environment=AUTOCACHE_EXTRA_ARGS=
 EnvironmentFile=-/home/autocache/autocache.env
-ExecStart=/bin/sh -lc 'exec /home/autocache/bin/autocache -addr "$AUTOCACHE_ADDR" -metrics-addr "$AUTOCACHE_METRICS_ADDR" -data-dir "$AUTOCACHE_DATA_DIR" -config "$AUTOCACHE_CONFIG" $AUTOCACHE_EXTRA_ARGS'
+ExecStart=/bin/bash -c 'config_args=(); if [ -n "$AUTOCACHE_CONFIG" ]; then config_args=(-config "$AUTOCACHE_CONFIG"); fi; exec /home/autocache/bin/autocache -addr "$AUTOCACHE_ADDR" -metrics-addr "$AUTOCACHE_METRICS_ADDR" -data-dir "$AUTOCACHE_DATA_DIR" "${config_args[@]}" $AUTOCACHE_EXTRA_ARGS'
 Restart=always
 RestartSec=5s
 LimitNOFILE=65535

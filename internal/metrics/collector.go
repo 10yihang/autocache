@@ -2,9 +2,25 @@ package metrics
 
 import (
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
+
+var allowedCommands = map[string]struct{}{
+	"append": {}, "asking": {}, "client": {}, "command": {}, "config": {}, "dbsize": {},
+	"decr": {}, "decrby": {}, "debug": {}, "del": {}, "echo": {}, "exists": {},
+	"expire": {}, "expireat": {}, "flushall": {}, "flushdb": {}, "get": {}, "getset": {},
+	"hdel": {}, "hexists": {}, "hget": {}, "hgetall": {}, "hkeys": {}, "hlen": {},
+	"hset": {}, "hvals": {}, "incr": {}, "incrby": {}, "info": {}, "keys": {},
+	"lindex": {}, "llen": {}, "lpop": {}, "lpush": {}, "lrange": {}, "lset": {},
+	"ltrim": {}, "mget": {}, "migrate": {}, "mset": {}, "persist": {}, "pexpire": {},
+	"ping": {}, "psetex": {}, "pttl": {}, "quit": {}, "rename": {}, "replapply": {},
+	"restore": {}, "rpop": {}, "rpush": {}, "sadd": {}, "scard": {}, "set": {},
+	"setex": {}, "setnx": {}, "sismember": {}, "smembers": {}, "srem": {}, "strlen": {},
+	"ttl": {}, "type": {}, "wait": {}, "zadd": {}, "zcard": {}, "zrange": {},
+	"zrank": {}, "zrem": {}, "zscore": {},
+}
 
 // Collector collects custom metrics
 type Collector struct {
@@ -46,9 +62,12 @@ func RecordCommand(cmd string, duration time.Duration, success bool) {
 	if !success {
 		status = "error"
 	}
+	commandLabel := normalizeCommandLabel(cmd)
 
 	CommandsTotal.WithLabelValues(cmd, status).Inc()
 	CommandDuration.WithLabelValues(cmd).Observe(duration.Seconds())
+	RequestsTotal.WithLabelValues(commandLabel, status).Inc()
+	RequestDuration.WithLabelValues(commandLabel).Observe(duration.Seconds())
 }
 
 // RecordCacheHit records cache hit
@@ -69,4 +88,40 @@ func RecordConnection(delta int) {
 // RecordTieredMigration records migration
 func RecordTieredMigration(direction string) {
 	TieredMigrations.WithLabelValues(direction).Inc()
+}
+
+func SetTieredBytes(tier string, size int64) {
+	TieredBytes.WithLabelValues(tier).Set(float64(size))
+}
+
+func SetTierCapacity(tier string, size int64) {
+	TierCapacityBytes.WithLabelValues(tier).Set(float64(size))
+}
+
+func SetTieredMigrationPending(count int) {
+	TieredMigrationPending.Set(float64(count))
+}
+
+func AddTieredMigrationInFlight(delta int) {
+	TieredMigrationInFlight.Add(float64(delta))
+}
+
+func ObserveTieredMigrationDuration(direction string, duration time.Duration, success bool) {
+	result := "success"
+	if !success {
+		result = "error"
+	}
+	TieredMigrationDuration.WithLabelValues(direction, result).Observe(duration.Seconds())
+}
+
+func RecordTieredMigrationError(direction, errorType string) {
+	TieredMigrationErrors.WithLabelValues(direction, errorType).Inc()
+}
+
+func normalizeCommandLabel(cmd string) string {
+	label := strings.ToLower(strings.TrimSpace(cmd))
+	if _, ok := allowedCommands[label]; ok {
+		return label
+	}
+	return "other"
 }

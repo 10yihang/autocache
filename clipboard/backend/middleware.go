@@ -92,6 +92,7 @@ func (m *Middleware) RateLimit(kind string, next http.Handler) http.Handler {
 		ip := clientIP(r.RemoteAddr)
 		allowed := m.allow(kind, ip, limit)
 		if !allowed {
+			recordNetcutRateLimit(kind)
 			http.Error(w, fmt.Sprintf("%s rate limit exceeded", kind), http.StatusTooManyRequests)
 			return
 		}

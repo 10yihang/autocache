@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react'
+import type { KeyboardEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { readPaste } from '../api/clipboard'
+import { createPaste, readPaste } from '../api/clipboard'
 
 export function PastePage() {
   const { code = '' } = useParams()
   const [content, setContent] = useState('')
   const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading')
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveMessage, setSaveMessage] = useState('')
+  const [saveError, setSaveError] = useState('')
+  const [sourceTTL, setSourceTTL] = useState('1h')
 
   useEffect(() => {
     let closed = false
@@ -17,6 +22,9 @@ export function PastePage() {
           return
         }
         setContent(response.paste.content)
+        setSourceTTL(response.paste.metadata.ttl || '1h')
+        setSaveMessage('')
+        setSaveError('')
         setStatus('ready')
       } catch {
         if (closed) {
@@ -30,6 +38,34 @@ export function PastePage() {
       closed = true
     }
   }, [code])
+
+  async function handleSave() {
+    if (isSaving || content.trim() === '') {
+      return
+    }
+
+    setIsSaving(true)
+    setSaveMessage('')
+    setSaveError('')
+    try {
+      const response = await createPaste({
+        content,
+        ttl: sourceTTL,
+      })
+      setSaveMessage(response.share_url)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '保存失败')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  function handleEditorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      void handleSave()
+    }
+  }
 
   if (status === 'loading') {
     return <section className="panel">正在加载分享内容...</section>
@@ -48,7 +84,33 @@ export function PastePage() {
   return (
     <section className="panel">
       <p className="kicker">分享内容</p>
-      <pre className="paste-content">{content}</pre>
+      <p className="muted">你可以继续编辑这段内容，并保存为新的分享链接。</p>
+      <label>
+        编辑内容
+        <textarea
+          className="paste-editor"
+          value={content}
+          onChange={(event) => {
+            setContent(event.target.value)
+            setSaveMessage('')
+            setSaveError('')
+          }}
+          onKeyDown={handleEditorKeyDown}
+          rows={12}
+        />
+      </label>
+      <div className="editor-actions">
+        <button disabled={isSaving || content.trim() === ''} onClick={() => void handleSave()} type="button">
+          {isSaving ? '保存中...' : '保存为新链接'}
+        </button>
+        <span className="muted">支持 Ctrl+S / Cmd+S 快捷保存</span>
+      </div>
+      {saveMessage ? (
+        <p className="success-text">
+          已保存为新的分享链接：<a href={saveMessage}>{saveMessage}</a>
+        </p>
+      ) : null}
+      {saveError ? <p className="error-text">{saveError}</p> : null}
     </section>
   )
 }

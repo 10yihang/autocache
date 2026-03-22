@@ -53,7 +53,23 @@ export type AdminPasteListResponse = {
   }>
 }
 
+const recentReadWindowMs = 2000
 const pendingReadRequests = new Map<string, Promise<ReadPasteResponse>>()
+const settledReadResponses = new Map<
+  string,
+  { response: ReadPasteResponse; expiresAt: number }
+>()
+
+function rememberSettledRead(code: string, response: ReadPasteResponse) {
+  const expiresAt = Date.now() + recentReadWindowMs
+  settledReadResponses.set(code, { response, expiresAt })
+  setTimeout(() => {
+    const current = settledReadResponses.get(code)
+    if (current && current.expiresAt <= Date.now()) {
+      settledReadResponses.delete(code)
+    }
+  }, recentReadWindowMs)
+}
 
 export function createPaste(payload: CreatePasteRequest) {
   return requestJSON<CreatePasteResponse>('/api/paste', {
@@ -63,14 +79,27 @@ export function createPaste(payload: CreatePasteRequest) {
 }
 
 export function readPaste(code: string) {
+  const settled = settledReadResponses.get(code)
+  if (settled && settled.expiresAt > Date.now()) {
+    return Promise.resolve(settled.response)
+  }
+  if (settled) {
+    settledReadResponses.delete(code)
+  }
+
   const cached = pendingReadRequests.get(code)
   if (cached) {
     return cached
   }
 
-  const request = requestJSON<ReadPasteResponse>(`/api/paste/${code}`).finally(() => {
-    pendingReadRequests.delete(code)
-  })
+  const request = requestJSON<ReadPasteResponse>(`/api/paste/${code}`)
+    .then((response) => {
+      rememberSettledRead(code, response)
+      return response
+    })
+    .finally(() => {
+      pendingReadRequests.delete(code)
+    })
   pendingReadRequests.set(code, request)
   return request
 }

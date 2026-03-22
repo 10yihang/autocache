@@ -1,0 +1,25 @@
+[Unit]
+Description=Netcut backend service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netcut
+Group=netcut
+WorkingDirectory=/home/netcut/backend
+EnvironmentFile=-/home/netcut/backend/netcut-backend.env
+ExecStart=/bin/sh -lc 'exec ${NETCUT_BACKEND_COMMAND:-/home/netcut/backend/bin/netcut-backend}'
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/netcut/backend /home/netcut/shared
+RuntimeDirectory=netcut-backend
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

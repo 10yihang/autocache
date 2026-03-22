@@ -3,6 +3,7 @@ import { readPaste } from './clipboard'
 
 describe('readPaste', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -65,14 +66,43 @@ describe('readPaste', () => {
     await expect(third).resolves.toMatchObject({ paste: { code: 'retry123' } })
   })
 
-  it('does not cache settled responses across separate reads', async () => {
+  it('reuses a just-finished read for an immediate follow-up request', async () => {
+    vi.useFakeTimers()
+
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           paste: {
-            code: 'again123',
+            code: 'fresh123',
+            content: 'first',
+            metadata: {
+              ttl: '1h',
+              created_at: '2026-03-22T00:00:00Z',
+              expires_at: '2026-03-22T01:00:00Z',
+            },
+          },
+        }),
+      })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(readPaste('fresh123')).resolves.toMatchObject({ paste: { content: 'first' } })
+    await expect(readPaste('fresh123')).resolves.toMatchObject({ paste: { content: 'first' } })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('expires the short-lived read cache and fetches again later', async () => {
+    vi.useFakeTimers()
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          paste: {
+            code: 'later123',
             content: 'first',
             metadata: {
               ttl: '1h',
@@ -86,7 +116,7 @@ describe('readPaste', () => {
         ok: true,
         json: async () => ({
           paste: {
-            code: 'again123',
+            code: 'later123',
             content: 'second',
             metadata: {
               ttl: '1h',
@@ -99,8 +129,9 @@ describe('readPaste', () => {
 
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(readPaste('again123')).resolves.toMatchObject({ paste: { content: 'first' } })
-    await expect(readPaste('again123')).resolves.toMatchObject({ paste: { content: 'second' } })
+    await expect(readPaste('later123')).resolves.toMatchObject({ paste: { content: 'first' } })
+    vi.advanceTimersByTime(2500)
+    await expect(readPaste('later123')).resolves.toMatchObject({ paste: { content: 'second' } })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

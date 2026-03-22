@@ -3,10 +3,10 @@
 Apply the root `AGENTS.md` first, then these operator-specific rules.
 
 ## OVERVIEW
-This package owns the controller-runtime reconcile flow for AutoCache clusters: config, services, StatefulSets, cluster initialization, scaling, and slot migration all converge here.
+This package owns the controller-runtime reconcile flow for AutoCache clusters: config, services, StatefulSets, cluster initialization, scaling, slot migration, and status updates all converge here.
 
 ## WHERE TO LOOK
-- `controllers/autocache_controller.go` - top-level reconcile loop, finalizers, status flow
+- `controllers/autocache_controller.go` - top-level reconcile loop, finalizers, status flow, cluster init trigger
 - `controllers/statefulset.go` - pod template and rollout behavior
 - `controllers/migration.go` - slot-plan and migration orchestration
 - `controllers/scaling.go` - scale-manager behavior and cluster resize flow
@@ -18,6 +18,7 @@ This package owns the controller-runtime reconcile flow for AutoCache clusters: 
 - Finalizer add/remove flows must be explicit and ordered so deletion remains safe and retryable.
 - Resource names, labels, selectors, and owner references must stay consistent across ConfigMaps, Services, StatefulSets, and Pods.
 - Prefer controller-runtime client patterns already used here over ad hoc Kubernetes calls.
+- When changing cluster initialization or migration behavior, cover degraded-health, stale-node, and partial-progress cases in tests.
 
 ## ANTI-PATTERNS
 - Do not mutate status fields based on assumptions when live cluster health or pod state is the real source of truth.

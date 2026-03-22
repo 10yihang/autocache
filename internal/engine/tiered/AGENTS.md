@@ -17,6 +17,7 @@ This package orchestrates promotion, demotion, and lifecycle management across h
 - Reads and writes should keep policy signals, stats collection, and migration counters in sync with actual tier movement.
 - Warm-tier and cold-tier initialization failures must fail fast with wrapped context (`%w`) so startup errors stay actionable.
 - Treat S3/cold-tier support as optional codepath; the commonly validated path is memory plus Badger.
+- Cross-tier helpers must preserve entry value/TTL semantics when promoting or demoting data.
 
 ## ANTI-PATTERNS
 - Do not launch goroutines without lifecycle tracking in `Manager` or `Migrator`.

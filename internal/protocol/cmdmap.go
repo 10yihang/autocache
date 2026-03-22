@@ -106,6 +106,8 @@ func (cm *cmdMap) registerAll() {
 	cm.register([]byte("ASKING"), cm.h.cmdAsking)
 	cm.register([]byte("RESTORE"), cm.h.cmdRestore)
 	cm.register([]byte("MIGRATE"), cm.h.cmdMigrate)
+	cm.register([]byte("REPLAPPLY"), cm.h.cmdReplApply)
+	cm.register([]byte("WAIT"), cm.h.cmdWait)
 }
 
 func (cm *cmdMap) register(name []byte, handler CommandHandler) {

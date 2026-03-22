@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	stdbytes "bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,11 +9,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tidwall/redcon"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	"github.com/10yihang/autocache/internal/cluster/replication"
 	"github.com/10yihang/autocache/internal/cluster/router"
 	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/memory"
@@ -32,12 +35,18 @@ type Handler struct {
 	clusterHandler *commands.ClusterHandler
 	clusterEnabled bool
 	router         router.Router
+	applier        *replication.ReplicaApplier
+
+	writeStateMu  sync.RWMutex
+	lastWriteSlot uint16
+	lastWriteLSN  uint64
 }
 
 func NewHandler(engine ProtocolEngine) *Handler {
 	h := &Handler{
 		engine:   engine,
 		commands: make(map[string]CommandFunc),
+		applier:  replication.NewReplicaApplier(),
 	}
 	h.registerCommands()
 	h.cmdMap = newCmdMap(h)
@@ -123,6 +132,8 @@ func (h *Handler) registerCommands() {
 	h.commands["ASKING"] = h.cmdAsking
 	h.commands["RESTORE"] = h.cmdRestore
 	h.commands["MIGRATE"] = h.cmdMigrate
+	h.commands["REPLAPPLY"] = h.cmdReplApply
+	h.commands["WAIT"] = h.cmdWait
 }
 
 func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes []byte, args [][]byte) {
@@ -177,6 +188,15 @@ func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes [
 				clearAskingFlag(conn)
 				return
 			}
+		}
+	}
+
+	if h.clusterEnabled && h.clusterHandler != nil && len(args) > 0 {
+		if h.isWriteCommand(cmdName) && !h.canAcceptWrite(cmdName, args) {
+			conn.WriteError("READONLY slot is not writable on this node")
+			record(false)
+			clearAskingFlag(conn)
+			return
 		}
 	}
 
@@ -237,6 +257,15 @@ func (h *Handler) Execute(ctx context.Context, conn redcon.Conn, cmd string, arg
 		}
 	}
 
+	if h.clusterEnabled && h.clusterHandler != nil && len(args) > 0 {
+		if h.isWriteCommand(cmd) && !h.canAcceptWrite(cmd, args) {
+			conn.WriteError("READONLY slot is not writable on this node")
+			record(false)
+			clearAskingFlag(conn)
+			return
+		}
+	}
+
 	fn(ctx, conn, args)
 	record(true)
 	clearAskingFlag(conn)
@@ -253,12 +282,30 @@ var keyCommands = map[string]bool{
 	"EXPIRE": true, "EXPIREAT": true, "PEXPIRE": true, "TTL": true, "PTTL": true, "PERSIST": true,
 }
 
+var writeCommands = map[string]bool{
+	"SET": true, "SETNX": true, "SETEX": true, "PSETEX": true, "GETSET": true,
+	"MSET": true, "HSET": true, "HDEL": true,
+	"LPUSH": true, "RPUSH": true, "LPOP": true, "RPOP": true, "LSET": true, "LTRIM": true,
+	"SADD": true, "SREM": true,
+	"ZADD": true, "ZREM": true,
+	"INCR": true, "INCRBY": true, "DECR": true, "DECRBY": true, "APPEND": true,
+	"DEL": true, "RENAME": true,
+	"EXPIRE": true, "EXPIREAT": true, "PEXPIRE": true, "PERSIST": true,
+	"RESTORE": true, "MIGRATE": true,
+}
+
+var errReplicationNoop = errors.New("replication noop")
+
 func (h *Handler) isKeyCommand(cmd string) bool {
 	return keyCommands[cmd]
 }
 
 func (h *Handler) isKeyCommandBytes(cmd []byte) bool {
 	return keyCommands[bytes.BytesToString(cmd)]
+}
+
+func (h *Handler) isWriteCommand(cmd string) bool {
+	return writeCommands[cmd]
 }
 
 func (h *Handler) handleRouteResult(conn redcon.Conn, result router.RouteResult) bool {
@@ -277,6 +324,147 @@ func (h *Handler) handleRouteResult(conn redcon.Conn, result router.RouteResult)
 		return false
 	}
 	return result.Local
+}
+
+func (h *Handler) canAcceptWrite(cmd string, args [][]byte) bool {
+	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
+		return true
+	}
+	keys := getKeysForCrossSlotCheck(cmd, args)
+	if len(keys) == 0 && len(args) > 0 && h.isKeyCommand(cmd) {
+		keys = [][]byte{args[0]}
+	}
+	if len(keys) == 0 {
+		return true
+	}
+	return h.clusterHandler.GetCluster().CanAcceptWrite(bytes.BytesToString(keys[0]))
+}
+
+func (h *Handler) applyReplicationWrite(ctx context.Context, key string, opType string, payload []byte, expireAtNs int64, apply func() error) error {
+	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
+		return apply()
+	}
+
+	coordinator := h.clusterHandler.GetCluster().GetReplicationManager()
+	if coordinator == nil {
+		return apply()
+	}
+
+	slot := h.clusterHandler.GetCluster().GetKeySlot(key)
+	op, err := coordinator.ApplyWrite(ctx, replication.WriteRequest{
+		Slot:       slot,
+		OpType:     opType,
+		Key:        key,
+		Payload:    payload,
+		ExpireAtNs: expireAtNs,
+		Apply:      apply,
+	})
+	if err == nil {
+		h.writeStateMu.Lock()
+		h.lastWriteSlot = slot
+		h.lastWriteLSN = op.LSN
+		h.writeStateMu.Unlock()
+	}
+	return err
+}
+
+func encodeReplicationPayload(args [][]byte) []byte {
+	if len(args) == 0 {
+		return nil
+	}
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		parts[i] = bytes.BytesToString(arg)
+	}
+	return []byte(strings.Join(parts, "\x00"))
+}
+
+func decodeReplicationPayload(payload []byte) []string {
+	if len(payload) == 0 {
+		return nil
+	}
+	parts := stdbytes.Split(payload, []byte{0})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, string(part))
+	}
+	return out
+}
+
+func (h *Handler) applyIncomingReplicationOp(ctx context.Context, op replication.Op) error {
+	if h.applier == nil {
+		h.applier = replication.NewReplicaApplier()
+	}
+	skip, err := h.applier.Begin(op)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
+	}
+
+	payload := decodeReplicationPayload(op.Payload)
+	err = nil
+	switch op.OpType {
+	case "SET":
+		if len(payload) == 0 {
+			return fmt.Errorf("invalid SET payload")
+		}
+		value := payload[0]
+		if len(payload) > 1 {
+			value = payload[1]
+		}
+		var ttl time.Duration
+		if op.ExpireAtNs > 0 {
+			ttl = time.Until(time.Unix(0, op.ExpireAtNs))
+			if ttl < 0 {
+				ttl = 0
+			}
+		}
+		err = h.engine.Set(ctx, op.Key, value, ttl)
+	case "MSET":
+		if len(payload) == 0 || len(payload)%2 != 0 {
+			return fmt.Errorf("invalid MSET payload")
+		}
+		pairs := make([]interface{}, 0, len(payload))
+		for _, part := range payload {
+			pairs = append(pairs, part)
+		}
+		err = h.engine.MSet(ctx, pairs...)
+	case "HSET":
+		if len(payload) < 3 || len(payload)%2 == 0 {
+			return fmt.Errorf("invalid HSET payload")
+		}
+		pairs := make([]interface{}, 0, len(payload)-1)
+		for _, part := range payload[1:] {
+			pairs = append(pairs, part)
+		}
+		_, err = h.engine.HSet(ctx, op.Key, pairs...)
+	case "DEL":
+		if len(payload) == 0 {
+			return fmt.Errorf("invalid DEL payload")
+		}
+		_, err = h.engine.Del(ctx, payload...)
+	case "RENAME":
+		if len(payload) != 2 {
+			return fmt.Errorf("invalid RENAME payload")
+		}
+		err = h.engine.Rename(ctx, payload[0], payload[1])
+	case "EXPIRE", "PEXPIRE", "EXPIREAT":
+		if op.ExpireAtNs <= 0 {
+			return fmt.Errorf("invalid expire timestamp")
+		}
+		_, err = h.engine.ExpireAt(ctx, op.Key, time.Unix(0, op.ExpireAtNs))
+	case "PERSIST":
+		_, err = h.engine.Persist(ctx, op.Key)
+	default:
+		return fmt.Errorf("unsupported replication op type: %s", op.OpType)
+	}
+	if err != nil {
+		return err
+	}
+	h.applier.Commit(op)
+	return nil
 }
 
 func (h *Handler) cmdPing(_ context.Context, conn redcon.Conn, args [][]byte) {
@@ -404,20 +592,40 @@ func (h *Handler) cmdSet(ctx context.Context, conn redcon.Conn, args [][]byte) {
 		return
 	}
 
-	if nx {
-		ok, _ := h.engine.SetNX(ctx, key, value, ttl)
-		if !ok {
-			conn.WriteNull()
-			return
+	expireAtNs := int64(0)
+	if ttl > 0 {
+		expireAtNs = time.Now().Add(ttl).UnixNano()
+	}
+	err := h.applyReplicationWrite(ctx, key, "SET", encodeReplicationPayload(args), expireAtNs, func() error {
+		if nx {
+			ok, setErr := h.engine.SetNX(ctx, key, value, ttl)
+			if setErr != nil {
+				return setErr
+			}
+			if !ok {
+				return errReplicationNoop
+			}
+			return nil
 		}
-	} else if xx {
-		ok, _ := h.engine.SetXX(ctx, key, value, ttl)
-		if !ok {
-			conn.WriteNull()
-			return
+		if xx {
+			ok, setErr := h.engine.SetXX(ctx, key, value, ttl)
+			if setErr != nil {
+				return setErr
+			}
+			if !ok {
+				return errReplicationNoop
+			}
+			return nil
 		}
-	} else {
-		h.engine.Set(ctx, key, value, ttl)
+		return h.engine.Set(ctx, key, value, ttl)
+	})
+	if errors.Is(err, errReplicationNoop) {
+		conn.WriteNull()
+		return
+	}
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
 	}
 
 	conn.WriteString("OK")
@@ -502,7 +710,12 @@ func (h *Handler) cmdMSet(ctx context.Context, conn redcon.Conn, args [][]byte) 
 		pairs[i] = bytes.BytesToString(arg)
 	}
 
-	h.engine.MSet(ctx, pairs...)
+	if err := h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "MSET", encodeReplicationPayload(args), 0, func() error {
+		return h.engine.MSet(ctx, pairs...)
+	}); err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	conn.WriteString("OK")
 }
 
@@ -531,7 +744,12 @@ func (h *Handler) cmdHSet(ctx context.Context, conn redcon.Conn, args [][]byte) 
 		pairs = append(pairs, bytes.BytesToString(arg))
 	}
 
-	added, err := h.engine.HSet(ctx, bytes.BytesToString(args[0]), pairs...)
+	var added int64
+	err := h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "HSET", encodeReplicationPayload(args), 0, func() error {
+		var applyErr error
+		added, applyErr = h.engine.HSet(ctx, bytes.BytesToString(args[0]), pairs...)
+		return applyErr
+	})
 	if err != nil {
 		h.writeDataError(conn, err)
 		return
@@ -1142,7 +1360,16 @@ func (h *Handler) cmdDel(ctx context.Context, conn redcon.Conn, args [][]byte) {
 		keys[i] = bytes.BytesToString(arg)
 	}
 
-	count, _ := h.engine.Del(ctx, keys...)
+	var count int64
+	err := h.applyReplicationWrite(ctx, keys[0], "DEL", encodeReplicationPayload(args), 0, func() error {
+		var applyErr error
+		count, applyErr = h.engine.Del(ctx, keys...)
+		return applyErr
+	})
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	conn.WriteInt64(count)
 }
 
@@ -1190,7 +1417,9 @@ func (h *Handler) cmdRename(ctx context.Context, conn redcon.Conn, args [][]byte
 		return
 	}
 
-	err := h.engine.Rename(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	err := h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "RENAME", encodeReplicationPayload(args), 0, func() error {
+		return h.engine.Rename(ctx, bytes.BytesToString(args[0]), bytes.BytesToString(args[1]))
+	})
 	if err != nil {
 		conn.WriteError("ERR " + err.Error())
 		return
@@ -1220,7 +1449,16 @@ func (h *Handler) cmdExpire(ctx context.Context, conn redcon.Conn, args [][]byte
 		return
 	}
 
-	ok, _ := h.engine.Expire(ctx, bytes.BytesToString(args[0]), time.Duration(secs)*time.Second)
+	var ok bool
+	err = h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "EXPIRE", encodeReplicationPayload(args), time.Now().Add(time.Duration(secs)*time.Second).UnixNano(), func() error {
+		var applyErr error
+		ok, applyErr = h.engine.Expire(ctx, bytes.BytesToString(args[0]), time.Duration(secs)*time.Second)
+		return applyErr
+	})
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	if ok {
 		conn.WriteInt(1)
 	} else {
@@ -1240,7 +1478,16 @@ func (h *Handler) cmdExpireAt(ctx context.Context, conn redcon.Conn, args [][]by
 		return
 	}
 
-	ok, _ := h.engine.ExpireAt(ctx, bytes.BytesToString(args[0]), time.Unix(ts, 0))
+	var ok bool
+	err = h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "EXPIREAT", encodeReplicationPayload(args), time.Unix(ts, 0).UnixNano(), func() error {
+		var applyErr error
+		ok, applyErr = h.engine.ExpireAt(ctx, bytes.BytesToString(args[0]), time.Unix(ts, 0))
+		return applyErr
+	})
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	if ok {
 		conn.WriteInt(1)
 	} else {
@@ -1260,7 +1507,16 @@ func (h *Handler) cmdPExpire(ctx context.Context, conn redcon.Conn, args [][]byt
 		return
 	}
 
-	ok, _ := h.engine.Expire(ctx, bytes.BytesToString(args[0]), time.Duration(ms)*time.Millisecond)
+	var ok bool
+	err = h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "PEXPIRE", encodeReplicationPayload(args), time.Now().Add(time.Duration(ms)*time.Millisecond).UnixNano(), func() error {
+		var applyErr error
+		ok, applyErr = h.engine.Expire(ctx, bytes.BytesToString(args[0]), time.Duration(ms)*time.Millisecond)
+		return applyErr
+	})
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	if ok {
 		conn.WriteInt(1)
 	} else {
@@ -1294,7 +1550,16 @@ func (h *Handler) cmdPersist(ctx context.Context, conn redcon.Conn, args [][]byt
 		return
 	}
 
-	ok, _ := h.engine.Persist(ctx, bytes.BytesToString(args[0]))
+	var ok bool
+	err := h.applyReplicationWrite(ctx, bytes.BytesToString(args[0]), "PERSIST", encodeReplicationPayload(args), 0, func() error {
+		var applyErr error
+		ok, applyErr = h.engine.Persist(ctx, bytes.BytesToString(args[0]))
+		return applyErr
+	})
+	if err != nil {
+		h.writeDataError(conn, err)
+		return
+	}
 	if ok {
 		conn.WriteInt(1)
 	} else {
@@ -1594,4 +1859,107 @@ func (h *Handler) cmdMigrate(ctx context.Context, conn redcon.Conn, args [][]byt
 	}
 
 	conn.WriteString("OK")
+}
+
+func (h *Handler) cmdReplApply(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 7 {
+		conn.WriteError("ERR wrong number of arguments for 'replapply' command")
+		return
+	}
+	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
+		conn.WriteError("ERR cluster is required for replapply")
+		return
+	}
+
+	slot, err := strconv.ParseUint(bytes.BytesToString(args[0]), 10, 16)
+	if err != nil {
+		conn.WriteError("ERR invalid slot")
+		return
+	}
+	epoch, err := strconv.ParseUint(bytes.BytesToString(args[1]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR invalid epoch")
+		return
+	}
+	lsn, err := strconv.ParseUint(bytes.BytesToString(args[2]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR invalid lsn")
+		return
+	}
+	expireAtNs, err := strconv.ParseInt(bytes.BytesToString(args[5]), 10, 64)
+	if err != nil {
+		conn.WriteError("ERR invalid expireAtNs")
+		return
+	}
+
+	op := replication.Op{
+		Slot:       uint16(slot),
+		Epoch:      epoch,
+		LSN:        lsn,
+		OpType:     bytes.BytesToString(args[3]),
+		Key:        bytes.BytesToString(args[4]),
+		ExpireAtNs: expireAtNs,
+		Payload:    append([]byte(nil), args[6]...),
+	}
+	if err := h.applyIncomingReplicationOp(context.Background(), op); err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
+	h.clusterHandler.GetCluster().GetReplicationManager().ReceiveTransportOp(op)
+	conn.WriteString("OK")
+}
+
+func (h *Handler) cmdWait(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 2 {
+		conn.WriteError("ERR wrong number of arguments for 'wait' command")
+		return
+	}
+	required, err := strconv.Atoi(bytes.BytesToString(args[0]))
+	if err != nil || required < 0 {
+		conn.WriteError("ERR invalid replica count")
+		return
+	}
+	timeoutMs, err := strconv.Atoi(bytes.BytesToString(args[1]))
+	if err != nil || timeoutMs < 0 {
+		conn.WriteError("ERR invalid timeout")
+		return
+	}
+	if required == 0 {
+		conn.WriteInt(0)
+		return
+	}
+	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
+		conn.WriteInt(0)
+		return
+	}
+	mgr := h.clusterHandler.GetCluster().GetReplicationManager()
+	if mgr == nil {
+		conn.WriteInt(0)
+		return
+	}
+
+	h.writeStateMu.RLock()
+	slot := h.lastWriteSlot
+	needLSN := h.lastWriteLSN
+	h.writeStateMu.RUnlock()
+	if needLSN == 0 {
+		conn.WriteInt(0)
+		return
+	}
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for {
+		snapshot := mgr.ReplicaProgressSnapshot(slot)
+		ackCount := 0
+		for _, ack := range snapshot {
+			if ack.AppliedLSN >= needLSN {
+				ackCount++
+			}
+		}
+		if ackCount >= required || time.Now().After(deadline) {
+			conn.WriteInt(ackCount)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

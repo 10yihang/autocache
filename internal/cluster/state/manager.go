@@ -19,6 +19,7 @@ type ClusterStateProvider interface {
 	GetNodeID() string
 	GetNodeInfos() []NodeInfo
 	GetSlotMap() [16384]string
+	GetSlotReplicationState() map[uint16]SlotReplicaSet
 	GetMigratingSlots() map[uint16]MigrationState
 	GetCurrentEpoch() uint64
 	GetMyEpoch() uint64
@@ -138,6 +139,7 @@ func (m *StateManager) save() error {
 		NodeID:         m.provider.GetNodeID(),
 		Nodes:          m.provider.GetNodeInfos(),
 		SlotMap:        m.provider.GetSlotMap(),
+		SlotReplicas:   m.provider.GetSlotReplicationState(),
 		MigratingSlots: m.provider.GetMigratingSlots(),
 		CurrentEpoch:   m.provider.GetCurrentEpoch(),
 		MyEpoch:        m.provider.GetMyEpoch(),

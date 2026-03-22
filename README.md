@@ -46,6 +46,36 @@ redis-cli -p 6379 PING
 ./autocache -cli PING
 ```
 
+### Clipboard Demo App
+
+The repository also contains a standalone clipboard demo app that talks to AutoCache through a standard Redis client.
+
+- Frontend: `clipboard/frontend` (React + Vite + TypeScript)
+- Backend: `clipboard/backend` (Go API + SPA/static serving)
+
+```bash
+# Terminal 1: start AutoCache
+go run ./cmd/server -addr 127.0.0.1:6379 -metrics-addr 127.0.0.1:9121
+
+# Terminal 2: build frontend assets and clipboard binary
+make build-clipboard-frontend
+make build-clipboard
+./bin/clipboard -addr 127.0.0.1:8080 -backend-addr 127.0.0.1:6379 -metrics-addr 127.0.0.1:9122 -admin-token test-token
+
+# Or run directly
+make run-clipboard
+```
+
+Useful clipboard targets:
+
+```bash
+make build-clipboard-frontend
+make build-clipboard
+make test-clipboard
+```
+
+The public UI is served at `http://127.0.0.1:8080/`, paste pages are at `http://127.0.0.1:8080/p/<code>`, and the admin SPA is at `http://127.0.0.1:8080/admin`. Token-protected admin APIs are available at `/admin/stats` and `/admin/pastes` using `Authorization: Bearer <admin-token>`. Clipboard metrics are exposed at `http://127.0.0.1:9122/metrics`.
+
 ### Kubernetes
 
 Deploy AutoCache to your Kubernetes cluster using Helm:
@@ -152,10 +182,18 @@ Ensure you have Go 1.24.0+ installed.
 ```bash
 # Build all components
 go build ./cmd/server
+go build ./cmd/clipboard
 go build ./cmd/operator
+
+# Build clipboard frontend assets for Go embed
+make build-clipboard-frontend
 
 # Run tests with race detection
 go test -v -race ./...
+
+# Clipboard-only workflow
+make build-clipboard
+make test-clipboard
 
 # Linting
 golangci-lint run ./...

@@ -1,6 +1,6 @@
 # AutoCache Makefile
 
-.PHONY: all build build-operator run test test-unit test-integration test-benchmark lint fmt vet docker-build docker-run kind-create kind-delete kind-load generate manifests install-crd clean redis-benchmark help
+.PHONY: all build build-clipboard build-clipboard-frontend build-operator run run-clipboard test test-clipboard test-unit test-integration test-benchmark lint fmt vet docker-build docker-run kind-create kind-delete kind-load generate manifests install-crd clean redis-benchmark help
 
 # Variables
 BINARY_NAME=autocache
@@ -15,6 +15,15 @@ all: build
 build:
 	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME) ./cmd/server
 
+build-clipboard: build-clipboard-frontend
+	$(GO) build $(GOFLAGS) -o bin/clipboard ./cmd/clipboard
+
+build-clipboard-frontend:
+	npm --prefix clipboard/frontend install
+	npm --prefix clipboard/frontend run build
+	rm -rf clipboard/backend/embed/*
+	cp -R clipboard/frontend/dist/. clipboard/backend/embed/
+
 build-operator:
 	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME)-operator ./cmd/operator
 
@@ -22,9 +31,15 @@ build-operator:
 run:
 	$(GO) run ./cmd/server
 
+run-clipboard: build-clipboard-frontend
+	$(GO) run ./cmd/clipboard
+
 # Test
 test:
 	$(GO) test -v -race -cover ./...
+
+test-clipboard:
+	$(GO) test -v -race ./clipboard/backend/... ./cmd/clipboard/...
 
 test-unit:
 	$(GO) test -v -race -cover ./internal/...
@@ -92,9 +107,13 @@ redis-benchmark:
 help:
 	@echo "Available targets:"
 	@echo "  build           - Build the server binary"
+	@echo "  build-clipboard - Build the clipboard binary"
+	@echo "  build-clipboard-frontend - Build and copy frontend assets"
 	@echo "  build-operator  - Build the operator binary"
 	@echo "  run             - Run the server"
+	@echo "  run-clipboard   - Run the clipboard app"
 	@echo "  test            - Run all tests"
+	@echo "  test-clipboard  - Run clipboard app tests"
 	@echo "  test-unit       - Run unit tests"
 	@echo "  test-benchmark  - Run benchmark tests"
 	@echo "  lint            - Run linter"

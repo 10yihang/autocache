@@ -29,6 +29,7 @@ Thumbs.db
 
 # Sisyphus agent working files
 .sisyphus/
+.worktrees/
 
 # Development plans (local only)
 plan/

@@ -6,203 +6,199 @@
 
 English | [中文](README_CN.md)
 
-> Redis-compatible distributed cache system in Go, featuring tiered storage and Kubernetes-native management.
+> Redis-compatible distributed cache system in Go, with tiered storage and Kubernetes-native control-plane support.
 
-AutoCache is a high-performance, distributed key-value store designed for cloud-native environments. It implements the RESP (Redis Serialization Protocol) to ensure compatibility with existing Redis clients while providing advanced features like tiered storage and seamless Kubernetes integration.
+AutoCache is a Redis-protocol-compatible distributed cache project focused on cloud-native deployment, cluster coordination, and tiered data placement. The repository includes two primary executables: the RESP server (`cmd/server`) and the Kubernetes operator (`cmd/operator`).
 
 ## Features
 
-- **RESP Protocol Compatible**: Works with standard Redis clients (`redis-cli`, `go-redis`, etc.).
-- **16384-Slot Sharding**: Redis Cluster compatible sharding for horizontal scalability.
-- **Tiered Storage**: Intelligent data placement across Memory (Hot), SSD (Warm), and S3 (Cold).
-- **Kubernetes Operator**: Native CRD-based management for automated deployment and scaling.
-- **Prometheus Metrics**: Built-in observability for monitoring cache performance and health.
-- **Cluster Routing**: Support for `MOVED` and `ASK` redirects with `ASKING` flag support.
+- **RESP-compatible access**: Works with standard Redis clients (`redis-cli`, `go-redis`, etc.).
+- **Redis Cluster-style sharding**: 16384-slot routing with `MOVED`/`ASK` redirects and `ASKING` support.
+- **Tiered storage path**: Validated `Memory (Hot) + BadgerDB (Warm)` path, with S3 cold tier marked experimental.
+- **Cluster coordination**: Gossip-based membership/status propagation with failover, replication, and slot migration modules.
+- **Kubernetes-native management**: CRD + controller-based operator for cluster lifecycle orchestration.
+- **Built-in observability**: Prometheus metrics endpoint for runtime visibility.
 
 ## Quick Start
 
-### Local Development
-
-Build and run the AutoCache server locally:
+### Local server
 
 ```bash
-# Build
-go build -o autocache ./cmd/server
+# Build server binary
+make build
 
-# Run
-./autocache
+# Run server
+./bin/autocache
 
 # Or run directly
-go run ./cmd/server
+make run
 ```
 
-Test the connection using `redis-cli` or the built-in CLI:
+Sanity check with `redis-cli`:
 
 ```bash
-# Test with redis-cli
 redis-cli -p 6379 PING
-
-# Or use built-in CLI
-./autocache -cli PING
 ```
 
-### Clipboard Demo App
-
-The repository also contains a standalone clipboard demo app that talks to AutoCache through a standard Redis client.
-
-- Frontend: `clipboard/frontend` (React + Vite + TypeScript)
-- Backend: `clipboard/backend` (Go API + SPA/static serving)
+CLI mode via the same server binary:
 
 ```bash
-# Terminal 1: start AutoCache
+./bin/autocache -cli -h 127.0.0.1 -p 6379 PING
+```
+
+### Tiered mode (Memory + Badger)
+
+```bash
+go run ./cmd/server \
+  -tiered-enabled \
+  -data-dir ./data \
+  -badger-path ./data/warm
+```
+
+### Clipboard demo app
+
+```bash
+# Terminal 1
 go run ./cmd/server -addr 127.0.0.1:6379 -metrics-addr 127.0.0.1:9121
 
-# Terminal 2: build frontend assets and clipboard binary
-make build-clipboard-frontend
+# Terminal 2
 make build-clipboard
 ./bin/clipboard -addr 127.0.0.1:8080 -backend-addr 127.0.0.1:6379 -metrics-addr 127.0.0.1:9122 -admin-token test-token
+```
 
-# Or run directly
+Or run directly:
+
+```bash
 make run-clipboard
 ```
 
-Useful clipboard targets:
+### Operator workflow (local cluster)
 
 ```bash
-make build-clipboard-frontend
-make build-clipboard
-make test-clipboard
+# Build operator
+make build-operator
+
+# Run operator locally (against your kubeconfig)
+go run ./cmd/operator
+
+# Generate/update CRDs and manifests
+make generate
+make manifests
+
+# Install CRD and deploy controller
+make install-crd
+make deploy
 ```
 
-The public UI is served at `http://127.0.0.1:8080/`, paste pages are at `http://127.0.0.1:8080/p/<code>`, and the admin SPA is at `http://127.0.0.1:8080/admin`. Token-protected admin APIs are available at `/admin/stats` and `/admin/pastes` using `Authorization: Bearer <admin-token>`. Clipboard metrics are exposed at `http://127.0.0.1:9122/metrics`.
+## Benchmarking
 
-### Kubernetes
+Reproducible benchmark scripts are under `scripts/`:
 
-Deploy AutoCache to your Kubernetes cluster using Helm:
+- `scripts/bench-native.sh` - native localhost AutoCache vs Redis comparison
+- `scripts/bench-cluster.sh` - 3-node cluster benchmark with final summary table
+- `scripts/bench-vs-redis.sh` / `scripts/bench-vs-redis-full.sh` - broader command mix comparison
+- `scripts/bench-tiered.sh` / `scripts/bench-cloud-native.sh` - tiered/cloud-native scenarios
+
+Example:
 
 ```bash
-# Add Helm repository (example)
-helm repo add autocache https://charts.autocache.io
-helm repo update
-
-# Install AutoCache Operator
-helm install autocache-operator autocache/autocache-operator
-
-# Deploy an AutoCache cluster
-kubectl apply -f deploy/k8s/cluster.yaml
+bash scripts/bench-native.sh 50000 30 100
+bash scripts/bench-cluster.sh 60000 30
 ```
+
+Notes:
+
+- Results depend heavily on hardware, network, and container runtime.
+- Use benchmark numbers as scenario-specific measurements, not absolute conclusions.
+- Current primary validated storage path is Hot+Warm; Cold (S3) is experimental.
 
 ## Architecture
 
-### System Overview
-The system consists of a RESP server handling client requests, a protocol handler for command parsing, and a pluggable storage engine.
+### System overview
 
 ```mermaid
 graph TD
-    Client[Client] --> RESP[RESP Server]
+    Client[Redis Client] --> RESP[RESP Server]
     RESP --> Handler[Protocol Handler]
-    Handler --> Engine[Memory Engine]
     Handler --> Router[Cluster Router]
-    Router --> Remote[Remote Node]
-    Operator[K8s Operator] --> Cluster[Cluster Management]
+    Handler --> Engine[Tiered Engine]
+    Router --> Gossip[Gossip + Slot State]
+    Router --> Redirect[MOVED/ASK]
+    Engine --> Hot[Memory Hot Tier]
+    Engine --> Warm[Badger Warm Tier]
+    Engine --> Cold[S3 Cold Tier - Experimental]
+    Operator[K8s Operator] --> Cluster[CRD + Reconcile]
 ```
 
-### Tiered Storage
-AutoCache supports tiered storage to balance performance and cost.
-The current validated path is Memory (Hot) + BadgerDB (Warm); S3 (Cold) is still experimental and not enabled in the primary benchmark/demo flow.
+### Tiered storage
 
 ```mermaid
 graph LR
     Hot[Memory - Hot] <--> Warm[BadgerDB - Warm]
-    Warm <--> Cold[S3 - Cold]
-    subgraph "Storage Engine"
-    Hot
-    Warm
-    Cold
-    end
-```
-
-### Cluster Routing
-AutoCache uses a 16384-slot sharding mechanism. Requests are routed based on the key's slot ownership.
-
-```mermaid
-graph TD
-    Key[Key] --> CRC16[CRC16 Hash]
-    CRC16 --> Slot[Slot 0-16383]
-    Slot --> Lookup{Owner Lookup}
-    Lookup -- Local --> Exec[Local Execution]
-    Lookup -- Remote --> Redirect[MOVED/ASK Redirect]
-```
-
-### K8s Operator
-The operator manages the lifecycle of AutoCache clusters, including scaling and slot migration.
-
-```mermaid
-graph TD
-    Reconcile[Reconcile Loop] --> STS[StatefulSet Management]
-    STS --> Migration[Slot Migration]
-    Migration --> Status[Status Update]
+    Warm <--> Cold[S3 - Cold (Experimental)]
 ```
 
 ## Configuration
 
-The server can be configured using the following flags:
+Server flags (`cmd/server`):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-addr` | `:6379` | Server listening address |
+| `-addr` | `:6379` | Server listen address |
 | `-cluster-enabled` | `false` | Enable cluster mode |
 | `-cluster-port` | `16379` | Cluster communication port |
+| `-node-id` | `""` | Node ID (auto-generated if empty) |
 | `-bind` | `127.0.0.1` | Bind address for cluster communication |
-| `-seeds` | `""` | Comma-separated seed nodes (host:port) |
-| `-node-id` | `""` | Unique node ID (auto-generated if empty) |
-| `-data-dir` | `./data` | Directory for persistent state |
-| `-cli` | `false` | Run in CLI mode |
-| `-h` | `127.0.0.1` | Server host (CLI mode) |
-| `-p` | `6379` | Server port (CLI mode) |
-
-## Benchmarks
-
-AutoCache is optimized for high-throughput workloads.
-
-- **Native Performance**: ~1.5x faster than Redis in local benchmarks (74K vs 49K ops/sec).
-- **Kubernetes Performance**: ~45% of Redis performance due to container networking overhead.
-
-*Note: Benchmarks vary based on hardware and network configuration.*
-
-**Reproduce Benchmarks:**
-```bash
-redis-benchmark -p 6379 -n 100000 -c 50 -t set,get -q
-```
+| `-seeds` | `""` | Comma-separated seed nodes (`host:port`) |
+| `-data-dir` | `./data` | Data directory |
+| `-config` | `""` | Optional config file path |
+| `-quiet-connections` | `false` | Reduce per-connection logs |
+| `-tiered-enabled` | `false` | Enable tiered storage |
+| `-badger-path` | `""` | Warm-tier Badger path (default `<data-dir>/warm`) |
+| `-metrics-addr` | `:9121` | Prometheus metrics address |
+| `-v` / `-version` | `false` | Print version and exit |
+| `-cli` | `false` | Run CLI mode |
+| `-h` | `127.0.0.1` | Server host for CLI mode |
+| `-p` | `6379` | Server port for CLI mode |
 
 ## Development
 
-Ensure you have Go 1.24.0+ installed.
+Prerequisites:
+
+- Go 1.24+
+- `golangci-lint` (for `make lint`)
+- `goimports` (for `make fmt`)
+- `controller-gen` (for `make generate` / `make manifests`)
+
+Common commands:
 
 ```bash
-# Build all components
-go build ./cmd/server
-go build ./cmd/clipboard
-go build ./cmd/operator
-
-# Build clipboard frontend assets for Go embed
-make build-clipboard-frontend
-
-# Run tests with race detection
-go test -v -race ./...
-
-# Clipboard-only workflow
+# Build
+make build
+make build-operator
 make build-clipboard
-make test-clipboard
 
-# Linting
-golangci-lint run ./...
+# Test
+make test
+make test-unit
+make test-integration
 
-# Formatting
-gofmt -w .
-goimports -w .
+# Quality
+make lint
+make fmt
+make vet
 ```
+
+## Project Layout
+
+- `cmd/server` - RESP server entrypoint
+- `cmd/operator` - Kubernetes operator entrypoint
+- `internal/protocol` - command handling and routing
+- `internal/engine` - memory/tiered storage engine
+- `internal/cluster` - gossip, failover, replication, migration
+- `controllers` + `api/v1alpha1` - CRD and reconcile logic
+- `scripts` - benchmark and cluster workflow scripts
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see [LICENSE](LICENSE).

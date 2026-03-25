@@ -23,6 +23,7 @@ import (
 	"github.com/10yihang/autocache/internal/engine/tiered"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
 	"github.com/10yihang/autocache/internal/protocol"
+	internalversion "github.com/10yihang/autocache/internal/version"
 )
 
 var (
@@ -35,6 +36,8 @@ var (
 	dataDir          = flag.String("data-dir", "./data", "data directory for persistent state")
 	configPath       = flag.String("config", "", "path to config file")
 	quietConnections = flag.Bool("quiet-connections", false, "disable per-connection connect/disconnect logs")
+	showVersion      = flag.Bool("v", false, "print version and exit")
+	showVersionLong  = flag.Bool("version", false, "print version and exit")
 
 	// Tiered storage flags
 	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
@@ -49,6 +52,11 @@ var (
 
 func main() {
 	flag.Parse()
+	if *showVersion || *showVersionLong {
+		fmt.Fprintln(os.Stdout, internalversion.Version)
+		return
+	}
+
 	var fileConfig map[string]string
 	if *configPath != "" {
 		cfg, err := loadConfigFile(*configPath)
@@ -66,7 +74,7 @@ func main() {
 
 	store := memory.NewStore(buildMemoryConfigFromConfig(fileConfig))
 	store.SetSlotFunc(hash.KeySlot)
-	metrics2.InitInfo("dev", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	metrics2.InitInfo(internalversion.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	metricsExporter := metrics2.NewExporter(*metricsAddr)
 	go func() {
 		if err := metricsExporter.Start(); err != nil && err.Error() != "http: Server closed" {

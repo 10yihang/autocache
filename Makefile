@@ -6,7 +6,9 @@
 BINARY_NAME=autocache
 DOCKER_IMAGE=autocache:latest
 GO=go
-GOFLAGS=-ldflags="-s -w"
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS=-s -w -X github.com/10yihang/autocache/internal/version.Version=$(VERSION)
+GOFLAGS=-ldflags="$(LDFLAGS)"
 
 # Default target
 all: build
@@ -107,6 +109,7 @@ redis-benchmark:
 help:
 	@echo "Available targets:"
 	@echo "  build           - Build the server binary"
+	@echo "                    version=$(VERSION) (override with 'make build VERSION=vX.Y.Z')"
 	@echo "  build-clipboard - Build the clipboard binary"
 	@echo "  build-clipboard-frontend - Build and copy frontend assets"
 	@echo "  build-operator  - Build the operator binary"

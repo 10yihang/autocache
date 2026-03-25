@@ -2,6 +2,10 @@
 FROM docker.1ms.run/library/golang:1.24 AS builder
 
 WORKDIR /workspace
+
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.org
+
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum

@@ -11,6 +11,13 @@ import (
 	"github.com/10yihang/autocache/internal/cluster/state"
 )
 
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 type ClusterState int
 
 const (
@@ -357,15 +364,15 @@ func (c *Cluster) BroadcastSlotOwnershipChange(slot uint16, newPrimary string) e
 }
 
 func (c *Cluster) onNodeJoin(node *gossip.GossipNode) {
-	log.Printf("Node joined: %s (%s)", node.ID[:8], node.Addr())
+	log.Printf("Node joined: %s (%s)", shortID(node.ID), node.Addr())
 }
 
 func (c *Cluster) onNodeLeave(node *gossip.GossipNode) {
-	log.Printf("Node left: %s (%s)", node.ID[:8], node.Addr())
+	log.Printf("Node left: %s (%s)", shortID(node.ID), node.Addr())
 }
 
 func (c *Cluster) onSlotChange(slot uint16, nodeID string) {
-	log.Printf("Slot %d assigned to %s", slot, nodeID[:8])
+	log.Printf("Slot %d assigned to %s", slot, shortID(nodeID))
 }
 
 func gossipNodeToNode(gn *gossip.GossipNode) *Node {

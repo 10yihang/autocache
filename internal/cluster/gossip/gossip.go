@@ -18,6 +18,13 @@ const (
 	GossipCount               = 3
 )
 
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 type NodeState int
 
 const (
@@ -337,7 +344,7 @@ func (g *Gossip) processNodeInfo(info *NodeInfo) {
 		}
 		g.nodes[info.ID] = node
 
-		log.Printf("Discovered new node: %s (%s:%d)", info.ID[:8], info.IP, info.Port)
+		log.Printf("Discovered new node: %s (%s:%d)", shortID(info.ID), info.IP, info.Port)
 
 		if g.onNodeJoin != nil {
 			go g.onNodeJoin(node)
@@ -492,7 +499,7 @@ func (g *Gossip) checkNodeFailures() {
 		if state == NodeStateConnected {
 			if now-pongReceived > timeout {
 				node.MarkPFail()
-				log.Printf("Node %s marked as PFAIL", node.ID[:8])
+				log.Printf("Node %s marked as PFAIL", shortID(node.ID))
 			}
 		}
 
@@ -508,7 +515,7 @@ func (g *Gossip) checkNodeFailures() {
 			if failReports >= (masterCount/2 + 1) {
 				node.MarkFail()
 				log.Printf("Node %s marked as FAIL (reports: %d/%d)",
-					node.ID[:8], failReports, masterCount)
+					shortID(node.ID), failReports, masterCount)
 
 				go g.broadcastFail(node.ID)
 

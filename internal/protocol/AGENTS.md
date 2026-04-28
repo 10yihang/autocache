@@ -3,28 +3,33 @@
 Apply the root `AGENTS.md` first, then these protocol-specific rules.
 
 ## OVERVIEW
-This package is the RESP edge: command lookup, cluster-aware routing, replication apply hooks, reply formatting, adapters, and protocol benchmarks all converge here.
+RESP edge: command lookup, cluster-aware routing, replication apply hooks, reply formatting, adapters, and protocol benchmarks all converge here. The package owns both the wire surface (`Server` + redcon) and the dispatch surface (`Handler` + `cmdMap`).
 
 ## WHERE TO LOOK
-- `internal/protocol/handler.go` - command registration, routing gates, write acceptance, command implementations
-- `internal/protocol/cmdmap.go` - fast command lookup path for `[]byte` dispatch
-- `internal/protocol/commands/cluster.go` - cluster subcommands and cluster-only behavior
-- `internal/protocol/adapter.go` - bridge from RESP handlers to storage engines
-- `internal/protocol/handler_*_test.go` - command-family coverage including primary/migrate cases
-- `internal/protocol/crossslot_test.go` - slot-routing and multi-key safety expectations
+- `handler.go` — `Handler`, `registerCommands()`, `ExecuteBytes()` / `Execute()`, write-acceptance gate, replication apply hook
+- `server.go` — `Server` lifecycle, `Client` per-connection state, redcon glue
+- `cmdmap.go` — fast `[]byte` dispatch table for hot-path command lookup
+- `connstate.go` — per-connection ASKING flag, DB selection, write tracking
+- `crossslot.go` — multi-key slot validation and `CROSSSLOT` rejection
+- `responses.go` — pooled RESP reply formatting, integer caching
+- `adapter.go` — `MemoryStoreAdapter` and `TieredStoreAdapter` bridge to engines
+- `commands/cluster.go` — `CLUSTER` subcommands and cluster-only behavior
+- `handler_*_test.go`, `crossslot_test.go` — coverage for command families, primary/migrate cases, slot-routing edge cases
 
 ## CONVENTIONS
-- Register every new command in `registerCommands()` and keep `cmdMap` lookup behavior aligned with it.
-- Preserve exact Redis-style behavior where already implemented: argument validation, error text, reply shape, and cross-slot rejection semantics matter.
-- Use `pkg/bytes`, pooled protocol helpers, and existing byte-oriented utilities on hot paths instead of casual string conversion churn.
-- When cluster mode is involved, verify both direct execution and routing behavior (`MOVED`, `ASK`, asking flag, multi-key slot checks, readonly write rejection).
-- If a write path interacts with replication, keep `REPLAPPLY`/`WAIT` semantics and write-state bookkeeping consistent with command execution.
+- Register every new command in `registerCommands()` and keep `cmdMap` aligned; lookup is `[]byte`-keyed and case-folded.
+- Preserve exact Redis-style behavior: argument validation, error text (`WRONGTYPE`, `MOVED`, `ASK`, `CROSSSLOT`, `READONLY`), reply shape, and cross-slot rejection semantics matter for client compatibility.
+- Use `pkg/bytes` and `pkg/protocolbuf` (sync.Pool, slab pool, args pool) on hot paths instead of `string()` / `[]byte()` churn.
+- For cluster mode, verify both direct execution and routing behavior: `MOVED`, `ASK`, `ASKING` flag handling, multi-key slot checks, readonly write rejection on replicas.
+- Write paths must keep `REPLAPPLY` / `WAIT` semantics consistent with `Handler` write tracking and `replication.Manager.ApplyWrite()`.
+- Connection cleanup belongs in the redcon close hook; do not leak `ConnState` entries.
 
 ## ANTI-PATTERNS
-- Do not add a handler without matching tests for normal execution and routing/slot edge cases.
-- Do not bypass metrics recording or connection-state cleanup when returning early from `ExecuteBytes` or `Execute`.
-- Do not mix protocol concerns with storage-engine internals when an adapter or engine interface already exists.
+- Do not add a handler without tests for normal execution AND routing/slot edge cases.
+- Do not bypass metrics recording or `ConnState` cleanup when returning early from `ExecuteBytes` / `Execute`.
+- Do not mix protocol concerns with engine internals; go through the adapter or the engine interface.
 - Do not change command names, reply shapes, or error strings casually; client compatibility depends on them.
+- Do not allocate fresh `[]byte` for every reply when a pooled or static response in `responses.go` already exists.
 
 ## VERIFY
 ```bash

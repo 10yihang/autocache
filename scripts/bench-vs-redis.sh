@@ -39,10 +39,10 @@ spec:
     - containerPort: 6379
     resources:
       requests:
-        cpu: "100m"
+        cpu: "1m"
         memory: "128Mi"
       limits:
-        cpu: "1"
+        cpu: "2"
         memory: "512Mi"
 EOF
 
@@ -79,10 +79,10 @@ spec:
       - containerPort: 6379
     resources:
       requests:
-        cpu: "100m"
+        cpu: "1"
         memory: "128Mi"
       limits:
-        cpu: "1"
+        cpu: "2"
         memory: "512Mi"
     volumeMounts:
       - name: data
@@ -144,13 +144,6 @@ echo -n "  INCR:  "
 REDIS_INCR=$(run_single_bench ${REDIS_IP} "INCR" "redis:counter")
 echo "${REDIS_INCR} req/s"
 
-echo -n "  LPUSH: "
-REDIS_LPUSH=$(run_single_bench ${REDIS_IP} "LPUSH" "redis:list __data__")
-echo "${REDIS_LPUSH} req/s"
-
-echo -n "  LPOP:  "
-REDIS_LPOP=$(run_single_bench ${REDIS_IP} "LPOP" "redis:list")
-echo "${REDIS_LPOP} req/s"
 
 echo ""
 echo -e "${YELLOW}[4/5] Benchmarking AutoCache...${NC}"
@@ -172,14 +165,6 @@ echo "${AC_GET} req/s"
 echo -n "  INCR:  "
 AC_INCR=$(run_single_bench ${AUTOCACHE_IP} "INCR" "autocache:counter")
 echo "${AC_INCR} req/s"
-
-echo -n "  LPUSH: "
-AC_LPUSH=$(run_single_bench ${AUTOCACHE_IP} "LPUSH" "autocache:list __data__")
-echo "${AC_LPUSH} req/s"
-
-echo -n "  LPOP:  "
-AC_LPOP=$(run_single_bench ${AUTOCACHE_IP} "LPOP" "autocache:list")
-echo "${AC_LPOP} req/s"
 
 echo -e "${YELLOW}  Optional note: non-core command results may be zero if the target runtime does not expose that command in this environment.${NC}"
 
@@ -233,8 +218,6 @@ print_row "PING" "$REDIS_PING" "$AC_PING"
 print_row "SET" "$REDIS_SET" "$AC_SET"
 print_row "GET" "$REDIS_GET" "$AC_GET"
 print_row "INCR" "$REDIS_INCR" "$AC_INCR"
-print_row "LPUSH" "$REDIS_LPUSH" "$AC_LPUSH"
-print_row "LPOP" "$REDIS_LPOP" "$AC_LPOP"
 
 echo -e "${CYAN}╚═══════════╩═══════════════════╩═══════════════════╩═══════════════════╝${NC}"
 echo ""

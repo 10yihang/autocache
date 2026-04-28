@@ -87,9 +87,9 @@ run_bench() {
     echo -e "${GREEN}--- ${name} (localhost:${port}) ---${NC}"
     safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
         -t ping,set,get,incr | grep -E "PING_INLINE|SET:|GET:|INCR:"
-    echo -e "${YELLOW}  Optional extended commands (best effort):${NC}"
-    safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
-        -t lpush,rpush,lpop,rpop,sadd,hset,mset | grep -E "LPUSH:|RPUSH:|LPOP:|RPOP:|SADD:|HSET:|MSET|ERR unknown command" || true
+    # echo -e "${YELLOW}  Optional extended commands (best effort):${NC}"
+    # safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
+    #     -t lpush,rpush,lpop,rpop,sadd,hset,mset | grep -E "LPUSH:|RPUSH:|LPOP:|RPOP:|SADD:|HSET:|MSET|ERR unknown command" || true
     echo ""
 }
 

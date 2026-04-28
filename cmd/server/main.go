@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	admin "github.com/10yihang/autocache/admin/backend"
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/cluster/state"
@@ -43,6 +46,13 @@ var (
 	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
 	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
 	metricsAddr   = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
+
+	// Admin UI flags
+	adminEnabled        = flag.Bool("admin-enabled", false, "enable built-in admin web UI")
+	adminAddr           = flag.String("admin-addr", "127.0.0.1:8080", "admin UI listen address")
+	adminUser           = flag.String("admin-user", "", "admin UI Basic Auth username (empty disables auth)")
+	adminPassword       = flag.String("admin-password", "", "admin UI Basic Auth password (plaintext or bcrypt $2a$/$2b$/$2y$)")
+	adminAllowDangerous = flag.Bool("admin-allow-dangerous", false, "allow admin UI write/mutate operations (FLUSHALL, key DELETE, etc.)")
 
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
@@ -164,6 +174,34 @@ func main() {
 		log.Printf("Cluster mode enabled, node ID: %s", clusterInstance.GetSelf().ID)
 	}
 
+	var adminServer *admin.Server
+	if *adminEnabled {
+		adminCfg := admin.Config{
+			Addr:           *adminAddr,
+			User:           *adminUser,
+			Password:       *adminPassword,
+			AllowDangerous: *adminAllowDangerous,
+		}
+		deps := admin.Deps{
+			Store:     store,
+			Cluster:   clusterInstance,
+			Tiered:    tieredMgr,
+			Version:   internalversion.Version,
+			GoVersion: runtime.Version(),
+			StartedAt: time.Now(),
+		}
+		if clusterInstance != nil {
+			deps.Replication = clusterInstance.GetReplicationManager()
+		}
+		adminServer = admin.New(deps, adminCfg)
+		go func() {
+			log.Printf("Admin UI listening on %s", adminServer.Addr())
+			if err := adminServer.Start(); err != nil && err != http.ErrServerClosed {
+				log.Printf("Admin server stopped with error: %v", err)
+			}
+		}()
+	}
+
 	go func() {
 		if err := server.Start(); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
@@ -175,6 +213,14 @@ func main() {
 	<-sigCh
 
 	log.Println("Shutting down...")
+
+	if adminServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := adminServer.Shutdown(ctx); err != nil {
+			log.Printf("Error shutting down admin server: %v", err)
+		}
+		cancel()
+	}
 
 	if stateManager != nil {
 		if err := stateManager.Close(); err != nil {
@@ -238,6 +284,21 @@ func applyConfig(cfg map[string]string) {
 	}
 	if v, ok := cfg["cluster-enabled"]; ok {
 		*clusterEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+	if v, ok := cfg["admin-enabled"]; ok {
+		*adminEnabled = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
+	}
+	if v, ok := cfg["admin-addr"]; ok && v != "" {
+		*adminAddr = v
+	}
+	if v, ok := cfg["admin-user"]; ok && v != "" {
+		*adminUser = v
+	}
+	if v, ok := cfg["admin-password"]; ok && v != "" {
+		*adminPassword = v
+	}
+	if v, ok := cfg["admin-allow-dangerous"]; ok {
+		*adminAllowDangerous = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
 	}
 }
 

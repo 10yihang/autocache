@@ -1,6 +1,6 @@
 # AutoCache Makefile
 
-.PHONY: all build build-clipboard build-clipboard-frontend build-operator run run-clipboard test test-clipboard test-unit test-integration test-benchmark lint fmt vet docker-build docker-run kind-create kind-delete kind-load generate manifests install-crd clean redis-benchmark help
+.PHONY: all build build-admin-frontend build-clipboard build-clipboard-frontend build-operator run run-clipboard test test-clipboard test-unit test-integration test-benchmark lint fmt vet docker-build docker-run kind-create kind-delete kind-load generate manifests install-crd clean redis-benchmark help
 
 # Variables
 BINARY_NAME=autocache
@@ -14,7 +14,7 @@ GOFLAGS=-ldflags="$(LDFLAGS)"
 all: build
 
 # Build
-build:
+build: build-admin-frontend
 	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME) ./cmd/server
 
 build-clipboard: build-clipboard-frontend
@@ -25,6 +25,12 @@ build-clipboard-frontend:
 	npm --prefix clipboard/frontend run build
 	rm -rf clipboard/backend/embed/*
 	cp -R clipboard/frontend/dist/. clipboard/backend/embed/
+
+build-admin-frontend:
+	npm --prefix admin/frontend install
+	npm --prefix admin/frontend run build
+	find admin/backend/embed -mindepth 1 ! -name '.gitkeep' -delete
+	cp -R admin/frontend/dist/. admin/backend/embed/
 
 build-operator:
 	$(GO) build $(GOFLAGS) -o bin/$(BINARY_NAME)-operator ./cmd/operator
@@ -110,6 +116,7 @@ help:
 	@echo "Available targets:"
 	@echo "  build           - Build the server binary"
 	@echo "                    version=$(VERSION) (override with 'make build VERSION=vX.Y.Z')"
+	@echo "  build-admin-frontend - Build and copy admin frontend assets"
 	@echo "  build-clipboard - Build the clipboard binary"
 	@echo "  build-clipboard-frontend - Build and copy frontend assets"
 	@echo "  build-operator  - Build the operator binary"

@@ -1,0 +1,93 @@
+.topbar {
+  height: 48px;
+  background: linear-gradient(180deg, var(--surface-2) 0%, color-mix(in srgb, var(--surface-2) 96%, black) 100%);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-shrink: 0;
+}
+
+.topbar__breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.topbar__crumb-prefix {
+  color: var(--fg-dim);
+}
+
+.topbar__crumb-sep {
+  color: var(--border-strong);
+}
+
+.topbar__crumb-page {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar__sse {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.topbar__sse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.topbar__sse--connecting .topbar__sse-dot { background: var(--warn); animation: pulse-dot 1.5s infinite; }
+.topbar__sse--connected .topbar__sse-dot { background: var(--ok); }
+.topbar__sse--reconnecting .topbar__sse-dot { background: var(--warn); animation: pulse-dot 0.8s infinite; }
+.topbar__sse--error .topbar__sse-dot { background: var(--danger); }
+
+.topbar__sse--connecting .topbar__sse-label { color: var(--warn); }
+.topbar__sse--connected .topbar__sse-label { color: var(--fg-dim); }
+.topbar__sse--reconnecting .topbar__sse-label { color: var(--warn); }
+.topbar__sse--error .topbar__sse-label { color: var(--danger); }
+
+.topbar__node-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  letter-spacing: 0.04em;
+}
+
+.topbar__theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background-color 100ms ease-out, color 100ms ease-out;
+}
+
+.topbar__theme-btn:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}

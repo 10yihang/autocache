@@ -1,0 +1,52 @@
+.slots-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.slots-page__lookup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.slots-page__input {
+  width: 160px;
+  font-family: var(--mono);
+}
+
+.slots-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.slots-detail__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.slots-detail__slot-num {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.slots-detail__info {
+  border: 1px solid var(--border);
+  max-width: 520px;
+}
+
+.slots-detail__migrate {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.slots-detail__migrate-note {
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--fg-dim);
+}

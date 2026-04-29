@@ -1,0 +1,53 @@
+.cluster-overview-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.slot-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.slot-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.slot-bar__label {
+  width: 76px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.slot-bar__track {
+  flex: 1;
+  height: 18px;
+  background: var(--bg-dim);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.slot-bar__fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+  min-width: 2px;
+}
+
+.slot-bar__count {
+  width: 48px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.replication-summary {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-dim);
+}

@@ -1,14 +1,20 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/10yihang/autocache/internal/cluster/gossip"
 	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/cluster/replication"
 	"github.com/10yihang/autocache/internal/cluster/state"
+	"github.com/10yihang/autocache/internal/engine"
+	"github.com/10yihang/autocache/internal/engine/memory"
 )
 
 func shortID(id string) string {
@@ -49,6 +55,9 @@ type Cluster struct {
 	currentEpoch uint64
 	myEpoch      uint64
 	mu           sync.RWMutex
+
+	engine       DrainEngine
+	drainTimeout time.Duration
 }
 
 type Config struct {
@@ -128,6 +137,172 @@ func (c *Cluster) Stop() error {
 		c.replication.Close()
 	}
 	return c.gossip.Stop()
+}
+
+// DrainEngine is the subset of storage operations needed for slot drain.
+type DrainEngine interface {
+	GetEntry(ctx context.Context, key string) (*engine.Entry, error)
+	Del(ctx context.Context, keys ...string) (int64, error)
+	KeysInSlot(slot uint16, count int) []string
+}
+
+func (c *Cluster) SetEngine(engine DrainEngine) {
+	c.engine = engine
+}
+
+func (c *Cluster) SetDrainTimeout(timeout time.Duration) {
+	c.drainTimeout = timeout
+}
+
+// DrainSlots migrates all slots owned by this node to peer masters before shutdown.
+// Best-effort: logs errors and continues, never blocks shutdown.
+func (c *Cluster) DrainSlots(ctx context.Context) error {
+	mySlots := c.slots.GetNodeSlots(c.self.ID)
+	if len(mySlots) == 0 {
+		log.Println("[drain] No slots owned by this node, skipping drain")
+		return nil
+	}
+
+	nodes := c.GetNodes()
+	var peers []*Node
+	for _, n := range nodes {
+		if n.ID != c.self.ID && n.Role == NodeRoleMaster && n.State == NodeStateConnected {
+			if n.IP != "" && n.Port > 0 {
+				peers = append(peers, n)
+			}
+		}
+	}
+	if len(peers) == 0 {
+		log.Println("[drain] No peer master nodes available, skipping drain")
+		return nil
+	}
+
+	if c.engine == nil {
+		return fmt.Errorf("engine not set, cannot drain slots")
+	}
+
+	connTimeout := 5 * time.Second
+	if c.drainTimeout > 0 && c.drainTimeout < connTimeout {
+		connTimeout = c.drainTimeout / time.Duration(len(mySlots)+1)
+	}
+
+	log.Printf("[drain] Draining %d slots across %d peer nodes", len(mySlots), len(peers))
+
+	for i, slot := range mySlots {
+		target := peers[i%len(peers)]
+		targetAddr := target.Addr()
+
+		log.Printf("[drain] Slot %d -> %s (%s)", slot, shortID(target.ID), targetAddr)
+
+		c.slots.SetExporting(slot, target.ID)
+
+		if err := c.drainSlot(ctx, slot, targetAddr, connTimeout); err != nil {
+			log.Printf("[drain] Slot %d migration failed: %v", slot, err)
+			c.slots.SetStable(slot)
+			continue
+		}
+
+		c.slots.FinishMigration(slot, target.ID)
+
+		if err := c.BroadcastSlotOwnershipChange(slot, target.ID); err != nil {
+			log.Printf("[drain] Slot %d ownership broadcast failed: %v", slot, err)
+		}
+
+		log.Printf("[drain] Slot %d drained successfully", slot)
+	}
+
+	log.Printf("[drain] Completed drain")
+	return nil
+}
+
+// drainSlot migrates all keys in a slot to the target address using TCP.
+func (c *Cluster) drainSlot(ctx context.Context, slot uint16, targetAddr string, timeout time.Duration) error {
+	keys := c.engine.KeysInSlot(slot, 0)
+	if len(keys) == 0 {
+		return nil
+	}
+
+	for _, key := range keys {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if err := c.drainKey(ctx, key, targetAddr, timeout); err != nil {
+			return fmt.Errorf("key %s: %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *Cluster) drainKey(ctx context.Context, key string, targetAddr string, timeout time.Duration) error {
+	entry, err := c.engine.GetEntry(ctx, key)
+	if err != nil {
+		return fmt.Errorf("get entry: %w", err)
+	}
+
+	var ttlMs int64
+	if !entry.ExpireAt.IsZero() {
+		ttlMs = time.Until(entry.ExpireAt).Milliseconds()
+		if ttlMs < 0 {
+			// key already expired, just delete locally
+			_, _ = c.engine.Del(ctx, key)
+			return nil
+		}
+	}
+
+	serialized, err := memory.SerializeEntryValue(entry)
+	if err != nil {
+		return fmt.Errorf("serialize: %w", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", targetAddr, timeout)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(timeout))
+
+	// ASKING
+	if _, err := conn.Write([]byte("*1\r\n$6\r\nASKING\r\n")); err != nil {
+		return fmt.Errorf("write ASKING: %w", err)
+	}
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("read ASKING: %w", err)
+	}
+	if resp := string(buf[:n]); resp != "+OK\r\n" {
+		return fmt.Errorf("ASKING unexpected response: %s", resp)
+	}
+
+	// RESTORE with REPLACE
+	keyLen := len(key)
+	ttlStr := strconv.FormatInt(ttlMs, 10)
+	serializedLen := len(serialized)
+	restoreCmd := fmt.Sprintf("*5\r\n$7\r\nRESTORE\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$7\r\nREPLACE\r\n",
+		keyLen, key, len(ttlStr), ttlStr, serializedLen, serialized)
+
+	if _, err := conn.Write([]byte(restoreCmd)); err != nil {
+		return fmt.Errorf("write RESTORE: %w", err)
+	}
+	n, err = conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("read RESTORE: %w", err)
+	}
+	if resp := string(buf[:n]); resp != "+OK\r\n" {
+		return fmt.Errorf("RESTORE failed: %s", resp)
+	}
+
+	// Delete locally
+	if _, err := c.engine.Del(ctx, key); err != nil {
+		return fmt.Errorf("del local: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Cluster) GetSelf() *Node {

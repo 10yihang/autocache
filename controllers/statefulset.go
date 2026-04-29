@@ -185,7 +185,8 @@ func (r *AutoCacheReconciler) buildStatefulSet(ac *cachev1alpha1.AutoCache) *app
 					NodeSelector:              ac.Spec.NodeSelector,
 					TopologySpreadConstraints: ac.Spec.TopologySpreadConstraints,
 					SchedulerName:             ac.Spec.SchedulerName,
-					PriorityClassName:         ac.Spec.PriorityClassName,
+					PriorityClassName:             ac.Spec.PriorityClassName,
+					TerminationGracePeriodSeconds: ptrInt64(120),
 				},
 			},
 			VolumeClaimTemplates: volumeClaimTemplates,
@@ -298,6 +299,13 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 			"--metrics-addr", ":9121",
 			"--cluster-enabled",
 			"--bind", "$(POD_IP)",
+		},
+		Lifecycle: &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"/bin/sh", "-c", "sleep 5"},
+				},
+			},
 		},
 	}
 }
@@ -496,4 +504,8 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+func ptrInt64(v int64) *int64 {
+	return &v
 }

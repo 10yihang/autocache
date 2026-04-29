@@ -108,6 +108,33 @@ export interface ClusterSlotsResponse {
   migrating?: Record<string, MigrationInfo>
 }
 
+export interface ClusterOverviewNode {
+  id: string
+  addr: string
+  role: string
+  state: string
+  slots_count: number
+  healthy: boolean
+}
+
+export interface ClusterReplicationHealth {
+  available: boolean
+  healthy_replicas: number
+  lagging_replicas: number
+}
+
+export interface ClusterOverviewResponse {
+  cluster_state: string
+  node_count: number
+  master_count: number
+  replica_count: number
+  slots_assigned: number
+  slots_migrating: number
+  self_node_id: string
+  nodes: ClusterOverviewNode[]
+  replication?: ClusterReplicationHealth
+}
+
 export interface KeyListResponse {
   keys: string[]
   cursor: string

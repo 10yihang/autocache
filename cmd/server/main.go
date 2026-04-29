@@ -54,6 +54,9 @@ var (
 	adminPassword       = flag.String("admin-password", "", "admin UI Basic Auth password (plaintext or bcrypt $2a$/$2b$/$2y$)")
 	adminAllowDangerous = flag.Bool("admin-allow-dangerous", false, "allow admin UI write/mutate operations (FLUSHALL, key DELETE, etc.)")
 
+	// Drain flags
+	drainTimeout = flag.Duration("drain-timeout", 90*time.Second, "max time for slot drain during graceful shutdown")
+
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
 	cliHost = flag.String("h", "127.0.0.1", "server host (CLI mode)")
@@ -172,6 +175,8 @@ func main() {
 		}
 
 		log.Printf("Cluster mode enabled, node ID: %s", clusterInstance.GetSelf().ID)
+			clusterInstance.SetEngine(store)
+			clusterInstance.SetDrainTimeout(*drainTimeout)
 	}
 
 	var adminServer *admin.Server
@@ -229,6 +234,12 @@ func main() {
 	}
 
 	if clusterInstance != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
+		if err := clusterInstance.DrainSlots(drainCtx); err != nil {
+			log.Printf("Error draining slots: %v", err)
+		}
+		drainCancel()
+
 		if err := clusterInstance.Stop(); err != nil {
 			log.Printf("Error stopping cluster: %v", err)
 		}

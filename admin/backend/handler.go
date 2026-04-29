@@ -39,6 +39,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux.Handle("/api/v1/cluster/info", chain(http.HandlerFunc(h.handleClusterInfo)))
 	mux.Handle("/api/v1/cluster/nodes", chain(http.HandlerFunc(h.handleClusterNodes)))
 	mux.Handle("/api/v1/cluster/slots", chain(http.HandlerFunc(h.handleClusterSlots)))
+	mux.Handle("/api/v1/cluster/overview", chain(http.HandlerFunc(h.handleClusterOverview)))
 	mux.Handle("/api/v1/keys", chain(http.HandlerFunc(h.handleKeysList)))
 	mux.Handle("/api/v1/keys/", chain(http.HandlerFunc(h.handleKeyByPath)))
 	mux.Handle("/api/v1/slots/", chain(http.HandlerFunc(h.handleSlotByPath)))

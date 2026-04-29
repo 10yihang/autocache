@@ -61,3 +61,5 @@ coverage.html
 # Frontend dependencies (restored by npm install)
 /admin/frontend/node_modules/
 /admin/frontend/dist/
+
+/docs_bs/

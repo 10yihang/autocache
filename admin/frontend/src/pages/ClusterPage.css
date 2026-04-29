@@ -3,3 +3,30 @@
   flex-direction: column;
   gap: 24px;
 }
+
+.page-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+}
+
+.page-tab {
+  padding: 8px 20px;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.page-tab:hover {
+  color: var(--fg);
+}
+
+.page-tab--active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}

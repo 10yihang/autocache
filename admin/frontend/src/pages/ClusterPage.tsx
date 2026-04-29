@@ -8,7 +8,28 @@ import { DataTable } from '../components/DataTable.tsx'
 import type { Column } from '../components/DataTable.tsx'
 import { Badge } from '../components/Badge.tsx'
 import { SlotHeatmap } from '../components/SlotHeatmap.tsx'
+import { ClusterOverviewPage } from './ClusterOverviewPage.tsx'
 import './ClusterPage.css'
+
+export function ClusterPage() {
+  const [tab, setTab] = useState<'overview' | 'details'>('overview')
+
+  return (
+    <div className="cluster-page">
+      <div className="page-tabs">
+        <button
+          className={`page-tab${tab === 'overview' ? ' page-tab--active' : ''}`}
+          onClick={() => setTab('overview')}
+        >Overview</button>
+        <button
+          className={`page-tab${tab === 'details' ? ' page-tab--active' : ''}`}
+          onClick={() => setTab('details')}
+        >Details</button>
+      </div>
+      {tab === 'overview' ? <ClusterOverviewPage /> : <ClusterDetails />}
+    </div>
+  )
+}
 
 const ERR_503 = 'ERR_CLUSTER_DISABLED'
 
@@ -16,7 +37,7 @@ function is503(e: unknown): boolean {
   return e instanceof ApiError && e.code === ERR_503
 }
 
-export function ClusterPage() {
+function ClusterDetails() {
   const [info, setInfo] = useState<ClusterInfoResponse | null>(null)
   const [nodes, setNodes] = useState<ClusterNodesResponse | null>(null)
   const [slots, setSlots] = useState<ClusterSlotsResponse | null>(null)
@@ -72,7 +93,7 @@ export function ClusterPage() {
   ]
 
   return (
-    <div className="cluster-page">
+    <>
       <div className="page-section">
         <div className="page-section__header">
           <span className="page-section__title">Cluster Info</span>
@@ -105,6 +126,6 @@ export function ClusterPage() {
           <EmptyState title="Slot data unavailable" />
         )}
       </div>
-    </div>
+    </>
   )
 }

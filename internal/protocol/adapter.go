@@ -325,11 +325,19 @@ func (a *TieredStoreAdapter) HGet(ctx context.Context, key, field string) (strin
 }
 
 func (a *TieredStoreAdapter) HSet(ctx context.Context, key string, pairs ...interface{}) (int64, error) {
-	return a.store.HSet(ctx, key, pairs...)
+	n, err := a.store.HSet(ctx, key, pairs...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) HDel(ctx context.Context, key string, fields ...string) (int64, error) {
-	return a.store.HDel(ctx, key, fields...)
+	n, err := a.store.HDel(ctx, key, fields...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) HExists(ctx context.Context, key, field string) (bool, error) {
@@ -353,19 +361,35 @@ func (a *TieredStoreAdapter) HLen(ctx context.Context, key string) (int64, error
 }
 
 func (a *TieredStoreAdapter) LPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return a.store.LPush(ctx, key, values...)
+	n, err := a.store.LPush(ctx, key, values...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) RPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return a.store.RPush(ctx, key, values...)
+	n, err := a.store.RPush(ctx, key, values...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) LPop(ctx context.Context, key string) (string, error) {
-	return a.store.LPop(ctx, key)
+	val, err := a.store.LPop(ctx, key)
+	if val != "" {
+		a.pushEntry(key)
+	}
+	return val, err
 }
 
 func (a *TieredStoreAdapter) RPop(ctx context.Context, key string) (string, error) {
-	return a.store.RPop(ctx, key)
+	val, err := a.store.RPop(ctx, key)
+	if val != "" {
+		a.pushEntry(key)
+	}
+	return val, err
 }
 
 func (a *TieredStoreAdapter) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
@@ -381,19 +405,35 @@ func (a *TieredStoreAdapter) LIndex(ctx context.Context, key string, index int64
 }
 
 func (a *TieredStoreAdapter) LSet(ctx context.Context, key string, index int64, value string) error {
-	return a.store.LSet(ctx, key, index, value)
+	err := a.store.LSet(ctx, key, index, value)
+	if err == nil {
+		a.pushEntry(key)
+	}
+	return err
 }
 
 func (a *TieredStoreAdapter) LTrim(ctx context.Context, key string, start, stop int64) error {
-	return a.store.LTrim(ctx, key, start, stop)
+	err := a.store.LTrim(ctx, key, start, stop)
+	if err == nil {
+		a.pushEntry(key)
+	}
+	return err
 }
 
 func (a *TieredStoreAdapter) SAdd(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return a.store.SAdd(ctx, key, members...)
+	n, err := a.store.SAdd(ctx, key, members...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) SRem(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return a.store.SRem(ctx, key, members...)
+	n, err := a.store.SRem(ctx, key, members...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) SMembers(ctx context.Context, key string) ([]string, error) {
@@ -409,11 +449,19 @@ func (a *TieredStoreAdapter) SCard(ctx context.Context, key string) (int64, erro
 }
 
 func (a *TieredStoreAdapter) ZAdd(ctx context.Context, key string, members ...engine.ZMember) (int64, error) {
-	return a.store.ZAdd(ctx, key, members...)
+	n, err := a.store.ZAdd(ctx, key, members...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) ZRem(ctx context.Context, key string, members ...string) (int64, error) {
-	return a.store.ZRem(ctx, key, members...)
+	n, err := a.store.ZRem(ctx, key, members...)
+	if n > 0 {
+		a.pushEntry(key)
+	}
+	return n, err
 }
 
 func (a *TieredStoreAdapter) ZRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
@@ -529,6 +577,19 @@ func mustSerializeEntry(entry *engine.Entry) []byte {
 		panic(err)
 	}
 	return serialized[1:]
+}
+
+func (a *TieredStoreAdapter) pushEntry(key string) {
+	wb := a.manager.GetWriteBehind()
+	if wb == nil {
+		return
+	}
+	entry, err := a.store.GetEntry(context.Background(), key)
+	if err != nil {
+		wb.AppendDel(key)
+		return
+	}
+	wb.AppendSet(key, entry)
 }
 
 func tieredStringValue(entry *engine.Entry) (string, error) {

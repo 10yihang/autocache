@@ -24,6 +24,11 @@ type Store struct {
 	db *badger.DB
 }
 
+// DB returns the underlying Badger database for advanced operations like WriteBatch.
+func (s *Store) DB() *badger.DB {
+	return s.db
+}
+
 // NewStore creates a new BadgerDB store
 func NewStore(path string) (*Store, error) {
 	opts := badger.DefaultOptions(path)

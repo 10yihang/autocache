@@ -25,6 +25,7 @@ import (
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/engine/tiered"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
+	"github.com/10yihang/autocache/internal/persistence"
 	"github.com/10yihang/autocache/internal/protocol"
 	internalversion "github.com/10yihang/autocache/internal/version"
 )
@@ -45,6 +46,7 @@ var (
 	// Tiered storage flags
 	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
 	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
+	persistEnabled = flag.Bool("persist-enabled", false, "enable async write-behind persistence to Badger (requires tiered-enabled)")
 	metricsAddr   = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
 
 	// Admin UI flags
@@ -123,6 +125,21 @@ func main() {
 			log.Fatalf("Failed to create tiered manager: %v", err)
 		}
 		tieredMgr.Start()
+
+		if *persistEnabled {
+			loaded, loadErr := tieredMgr.LoadFromDisk(context.Background())
+			if loadErr != nil {
+				log.Printf("Warning: failed to load data from disk: %v", loadErr)
+			} else {
+				log.Printf("Loaded %d keys from Badger into memory", loaded)
+			}
+
+			if err := tieredMgr.InitWriteBehind(persistence.DefaultConfig()); err != nil {
+				log.Printf("Warning: failed to start write-behind: %v", err)
+			} else {
+				log.Println("Write-behind persistence enabled")
+			}
+		}
 
 		engine = protocol.NewTieredStoreAdapter(tieredMgr, store)
 		log.Println("Tiered storage enabled, warm tier:", warmPath)

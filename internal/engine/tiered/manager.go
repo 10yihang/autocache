@@ -14,6 +14,7 @@ import (
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/engine/s3"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
+	"github.com/10yihang/autocache/internal/persistence"
 )
 
 // Config tiered storage config
@@ -85,6 +86,9 @@ type Manager struct {
 	// Migrator
 	migrator *Migrator
 
+	// Write-behind persistence
+	writeBehind *persistence.WriteBehind
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -152,6 +156,50 @@ func (m *Manager) initColdTier(endpoint, bucket string) (engine.Engine, error) {
 	return s3.NewStore(endpoint, bucket)
 }
 
+// SetWriteBehind attaches a write-behind persistence layer backed by the warm tier.
+func (m *Manager) SetWriteBehind(wb *persistence.WriteBehind) {
+	m.writeBehind = wb
+}
+
+// GetWriteBehind returns the attached write-behind, if any.
+func (m *Manager) GetWriteBehind() *persistence.WriteBehind {
+	return m.writeBehind
+}
+
+// warmStore returns the warm tier as a badger.Store, if available.
+func (m *Manager) warmStore() *badger.Store {
+	if m.warmTier == nil {
+		return nil
+	}
+	store, ok := m.warmTier.(*badger.Store)
+	if !ok {
+		return nil
+	}
+	return store
+}
+
+// LoadFromDisk restores all keys from the warm tier into the hot tier memory store.
+func (m *Manager) LoadFromDisk(ctx context.Context) (int64, error) {
+	store := m.warmStore()
+	if store == nil {
+		return 0, fmt.Errorf("warm tier not available for loading")
+	}
+	wb := persistence.NewWriteBehind(store.DB(), m.hotTier, persistence.DefaultConfig())
+	return wb.LoadIntoMemory(ctx)
+}
+
+// InitWriteBehind creates and starts a write-behind persistence layer backed by the warm tier.
+func (m *Manager) InitWriteBehind(cfg persistence.Config) error {
+	store := m.warmStore()
+	if store == nil {
+		return fmt.Errorf("warm tier not available for write-behind")
+	}
+	wb := persistence.NewWriteBehind(store.DB(), m.hotTier, cfg)
+	m.SetWriteBehind(wb)
+	wb.Start()
+	return nil
+}
+
 // Start starts background tasks
 func (m *Manager) Start() {
 	m.wg.Add(1)
@@ -159,11 +207,15 @@ func (m *Manager) Start() {
 	log.Println("Tiered storage manager started")
 }
 
-// Stop stops background tasks
+// Stop stops background tasks and flushes pending writes.
 func (m *Manager) Stop() {
 	m.cancel()
 	m.wg.Wait()
 	m.stats.Stop()
+
+	if m.writeBehind != nil {
+		m.writeBehind.Stop()
+	}
 
 	if m.warmTier != nil {
 		m.warmTier.Close()
@@ -223,11 +275,24 @@ func (m *Manager) Get(ctx context.Context, key string) (string, error) {
 	return "", engine.ErrKeyNotFound
 }
 
-// Set sets value to hot tier
+// Set sets value to hot tier and pushes to write-behind if enabled.
 func (m *Manager) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
 	err := m.hotTier.Set(ctx, key, value, ttl)
 	if err != nil {
 		return err
+	}
+
+	if m.writeBehind != nil {
+		var expireAt time.Time
+		if ttl > 0 {
+			expireAt = time.Now().Add(ttl)
+		}
+		m.writeBehind.AppendSet(key, &engine.Entry{
+			Key:      key,
+			Value:    value,
+			Type:     engine.TypeString,
+			ExpireAt: expireAt,
+		})
 	}
 
 	m.stats.RecordWrite(key, int64(len(value)))
@@ -236,7 +301,7 @@ func (m *Manager) Set(ctx context.Context, key string, value string, ttl time.Du
 	return nil
 }
 
-// Del deletes from all tiers
+// Del deletes from all tiers and pushes tombstone to write-behind.
 func (m *Manager) Del(ctx context.Context, keys ...string) (int64, error) {
 	var count int64
 
@@ -251,6 +316,12 @@ func (m *Manager) Del(ctx context.Context, keys ...string) (int64, error) {
 	if m.coldTier != nil {
 		c, _ := m.coldTier.Del(ctx, keys...)
 		count += c
+	}
+
+	if m.writeBehind != nil {
+		for _, key := range keys {
+			m.writeBehind.AppendDel(key)
+		}
 	}
 
 	for _, key := range keys {

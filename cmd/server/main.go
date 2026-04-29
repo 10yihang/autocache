@@ -22,6 +22,7 @@ import (
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/hash"
 	"github.com/10yihang/autocache/internal/cluster/hotspot"
+	"github.com/10yihang/autocache/internal/cluster/rebalance"
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/engine/tiered"
@@ -59,6 +60,8 @@ var (
 
 	// Drain flags
 	drainTimeout = flag.Duration("drain-timeout", 90*time.Second, "max time for slot drain during graceful shutdown")
+	// Rebalance flags
+	autoRebalance = flag.Bool("auto-rebalance", false, "enable automatic hot-slot rebalancing")
 
 	// CLI flags
 	cliMode = flag.Bool("cli", false, "run in CLI mode")
@@ -186,6 +189,8 @@ func main() {
 
 		server.SetCluster(clusterInstance)
 
+		clusterInstance.SetHotspotDetector(hotspotDetector)
+
 		var seedList []string
 		if *seeds != "" {
 			seedList = strings.Split(*seeds, ",")
@@ -198,6 +203,10 @@ func main() {
 		log.Printf("Cluster mode enabled, node ID: %s", clusterInstance.GetSelf().ID)
 			clusterInstance.SetEngine(store)
 			clusterInstance.SetDrainTimeout(*drainTimeout)
+			if *autoRebalance {
+				clusterInstance.InitRebalance(hotspotDetector, rebalance.DefaultConfig())
+				log.Println("Auto-rebalance enabled")
+			}
 	}
 
 	var adminServer *admin.Server
@@ -258,6 +267,8 @@ func main() {
 	}
 
 	if clusterInstance != nil {
+		clusterInstance.StopRebalance()
+
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), *drainTimeout)
 		if err := clusterInstance.DrainSlots(drainCtx); err != nil {
 			log.Printf("Error draining slots: %v", err)

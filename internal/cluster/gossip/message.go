@@ -47,6 +47,19 @@ type Message struct {
 	Data         []byte
 }
 
+// HotSlotGossip is a compact hot slot summary for gossip piggybacking.
+type HotSlotGossip struct {
+	Slot uint16
+	QPS  uint64
+}
+
+// NodeLoadInfo carries per-node load statistics.
+type NodeLoadInfo struct {
+	TotalQPS     uint64
+	HotSlotCount uint16
+	HotSlots     []HotSlotGossip
+}
+
 type NodeInfo struct {
 	ID          string
 	IP          string
@@ -58,6 +71,9 @@ type NodeInfo struct {
 	PongRecv    int64
 	ConfigEpoch uint64
 	Slots       []byte
+
+	// Load information (populated when hotspot detector is available).
+	Load NodeLoadInfo
 }
 
 const (

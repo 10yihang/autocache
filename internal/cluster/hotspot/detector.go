@@ -45,8 +45,9 @@ type Detector struct {
 	done   chan struct{}
 	wg     sync.WaitGroup
 
-	mu       sync.RWMutex
-	hotSlots []HotSlotInfo
+	mu           sync.RWMutex
+	hotSlots     []HotSlotInfo
+	lastTotalQPS float64
 
 	ticks uint64
 }
@@ -111,6 +112,13 @@ func (d *Detector) HotSlots() []HotSlotInfo {
 	return out
 }
 
+// TotalQPS returns the sum of all per-slot QPS in the last sample window.
+func (d *Detector) TotalQPS() float64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastTotalQPS
+}
+
 // Stop shuts down the detector.
 func (d *Detector) Stop() {
 	d.ticker.Stop()
@@ -172,6 +180,10 @@ func (d *Detector) sampleAndDetect(cfg Config) {
 		d.mu.Unlock()
 		return
 	}
+
+	d.mu.Lock()
+	d.lastTotalQPS = totalQPS
+	d.mu.Unlock()
 
 	avgQPS := totalQPS / float64(activeSlots)
 	if avgQPS < cfg.MinHotQPS {

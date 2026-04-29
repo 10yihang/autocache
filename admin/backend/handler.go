@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+
+	"github.com/10yihang/autocache/internal/cluster"
 )
 
 type HTTPHandler struct {
@@ -45,6 +47,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux.Handle("/api/v1/slots/", chain(http.HandlerFunc(h.handleSlotByPath)))
 	mux.Handle("/api/v1/command", chain(http.HandlerFunc(h.handleCommand)))
 	mux.Handle("/api/v1/replication/status", chain(http.HandlerFunc(h.handleReplicationStatus)))
+	mux.Handle("/api/v1/rebalance/status", chain(http.HandlerFunc(h.handleRebalanceStatus)))
 	mux.Handle("/api/v1/tiered/stats", chain(http.HandlerFunc(h.handleTieredStats)))
 	mux.Handle("/api/v1/hotspots", chain(http.HandlerFunc(h.handleHotspots)))
 	mux.Handle("/api/v1/audit", chain(http.HandlerFunc(h.handleAudit)))
@@ -74,6 +77,31 @@ func (h *HTTPHandler) handleHotspots(w http.ResponseWriter, _ *http.Request) {
 		"hot_slots":   h.deps.Hotspot.HotSlots(),
 		"sample_rate": "1s",
 	})
+}
+
+func (h *HTTPHandler) handleRebalanceStatus(w http.ResponseWriter, _ *http.Request) {
+	var nodes []map[string]interface{}
+	if h.deps.Cluster != nil {
+		for _, n := range h.deps.Cluster.GetNodes() {
+			if n.Role == cluster.NodeRoleMaster && n.State == cluster.NodeStateConnected {
+				nodes = append(nodes, map[string]interface{}{
+					"id":        n.ID,
+					"addr":      n.Addr(),
+					"total_qps": n.Load.TotalQPS,
+					"hot_slots": n.Load.HotSlotCount,
+				})
+			}
+		}
+	}
+	hot := h.deps.Hotspot.HotSlots()
+	response := map[string]interface{}{
+		"hot_slots": hot,
+		"peers":     nodes,
+	}
+	if len(hot) > 0 {
+		response["rebalance_candidates"] = len(hot)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *HTTPHandler) handleNotImplemented(w http.ResponseWriter, _ *http.Request) {

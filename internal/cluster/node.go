@@ -50,6 +50,12 @@ func (r NodeRole) String() string {
 	return "replica"
 }
 
+// NodeLoadInfo carries per-node load statistics (from gossip).
+type NodeLoadInfo struct {
+	TotalQPS     uint64
+	HotSlotCount uint16
+}
+
 type Node struct {
 	ID          string
 	IP          string
@@ -65,6 +71,8 @@ type Node struct {
 	PongReceived int64
 
 	FailReports map[string]int64
+
+	Load NodeLoadInfo
 
 	conn net.Conn
 	mu   sync.RWMutex
@@ -189,5 +197,6 @@ func (n *Node) Clone() *Node {
 		PingSent:     n.PingSent,
 		PongReceived: n.PongReceived,
 		FailReports:  failReports,
+		Load:         n.Load,
 	}
 }

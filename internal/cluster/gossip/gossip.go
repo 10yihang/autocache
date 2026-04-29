@@ -9,6 +9,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/10yihang/autocache/internal/cluster/hotspot"
 )
 
 const (
@@ -53,6 +55,7 @@ type GossipNode struct {
 	PingSent     int64
 	PongReceived int64
 	FailReports  map[string]int64
+	Load         NodeLoadInfo
 	mu           sync.RWMutex
 }
 
@@ -119,6 +122,7 @@ func (n *GossipNode) Clone() *GossipNode {
 		PingSent:     n.PingSent,
 		PongReceived: n.PongReceived,
 		FailReports:  failReports,
+		Load:         n.Load,
 	}
 }
 
@@ -141,6 +145,8 @@ type Gossip struct {
 
 	currentEpoch uint64
 	listener     net.Listener
+
+	hotspotDetector *hotspot.Detector
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -359,6 +365,8 @@ func (g *Gossip) processNodeInfo(info *NodeInfo) {
 		node.MasterID = info.MasterID
 	}
 	isMaster := node.Role == NodeRoleMaster
+	node.Load.TotalQPS = info.Load.TotalQPS
+	node.Load.HotSlotCount = info.Load.HotSlotCount
 	node.mu.Unlock()
 
 	if len(info.Slots) > 0 && isMaster {
@@ -580,7 +588,7 @@ func (g *Gossip) selfNodeInfo() *NodeInfo {
 
 	slots := g.slots.GetNodeSlots(selfID)
 
-	return &NodeInfo{
+	info := &NodeInfo{
 		ID:          selfID,
 		IP:          selfIP,
 		Port:        selfPort,
@@ -590,6 +598,25 @@ func (g *Gossip) selfNodeInfo() *NodeInfo {
 		ConfigEpoch: currentEpoch,
 		Slots:       SlotsToBytes(slots),
 	}
+
+	if g.hotspotDetector != nil {
+		hot := g.hotspotDetector.HotSlots()
+		info.Load.TotalQPS = uint64(g.hotspotDetector.TotalQPS())
+		info.Load.HotSlotCount = uint16(len(hot))
+		n := len(hot)
+		if n > 3 {
+			n = 3
+		}
+		info.Load.HotSlots = make([]HotSlotGossip, n)
+		for i := 0; i < n; i++ {
+			info.Load.HotSlots[i] = HotSlotGossip{
+				Slot: hot[i].Slot,
+				QPS:  uint64(hot[i].QPS),
+			}
+		}
+	}
+
+	return info
 }
 
 func (g *Gossip) randomGossipNodes() []*NodeInfo {
@@ -794,6 +821,10 @@ func (g *Gossip) recordSlotEpoch(slot uint16, epoch uint64) {
 		g.slotEpochs[slot] = epoch
 	}
 	g.slotEpochMu.Unlock()
+}
+
+func (g *Gossip) SetHotspotDetector(d *hotspot.Detector) {
+	g.hotspotDetector = d
 }
 
 func (g *Gossip) SetEventHandlers(onJoin, onLeave func(*GossipNode), onSlotChange func(uint16, string)) {

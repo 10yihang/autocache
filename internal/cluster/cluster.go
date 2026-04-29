@@ -11,6 +11,8 @@ import (
 
 	"github.com/10yihang/autocache/internal/cluster/gossip"
 	"github.com/10yihang/autocache/internal/cluster/hash"
+	"github.com/10yihang/autocache/internal/cluster/hotspot"
+	"github.com/10yihang/autocache/internal/cluster/rebalance"
 	"github.com/10yihang/autocache/internal/cluster/replication"
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine"
@@ -56,8 +58,9 @@ type Cluster struct {
 	myEpoch      uint64
 	mu           sync.RWMutex
 
-	engine       DrainEngine
-	drainTimeout time.Duration
+	engine         DrainEngine
+	drainTimeout   time.Duration
+	rebalanceMgr   *rebalance.Manager
 }
 
 type Config struct {
@@ -152,6 +155,88 @@ func (c *Cluster) SetEngine(engine DrainEngine) {
 
 func (c *Cluster) SetDrainTimeout(timeout time.Duration) {
 	c.drainTimeout = timeout
+}
+
+// InitRebalance creates and starts the auto-rebalance manager.
+func (c *Cluster) InitRebalance(detector *hotspot.Detector, cfg rebalance.Config) {
+	c.rebalanceMgr = rebalance.New(c, detector, cfg)
+}
+
+// GetPeerLoads returns load info for all peer master nodes.
+func (c *Cluster) GetPeerLoads() []rebalance.PeerLoad {
+	nodes := c.GetNodes()
+	peers := make([]rebalance.PeerLoad, 0, len(nodes))
+	for _, n := range nodes {
+		if n.ID == c.self.ID || n.Role != NodeRoleMaster {
+			continue
+		}
+		if n.State != NodeStateConnected {
+			continue
+		}
+		peers = append(peers, rebalance.PeerLoad{
+			NodeID:   n.ID,
+			Addr:     n.Addr(),
+			TotalQPS: n.Load.TotalQPS,
+		})
+	}
+	return peers
+}
+
+// GetSlotOwner returns the node ID that owns the given slot.
+func (c *Cluster) GetSlotOwner(slot uint16) string {
+	return c.slots.GetSlotNode(slot)
+}
+
+// IsSlotLocal returns true if this node owns the given slot.
+func (c *Cluster) IsSlotLocal(slot uint16) bool {
+	return c.slots.GetSlotNode(slot) == c.self.ID
+}
+
+// MigrateSlot triggers migration of a slot to a target node.
+func (c *Cluster) MigrateSlot(slot uint16, targetNodeID string) error {
+	// Mark slot as migrating.
+	c.slots.SetExporting(slot, targetNodeID)
+
+	// Migrate keys using existing drain infrastructure.
+	peer := c.getPeerAddr(targetNodeID)
+	if peer == "" {
+		c.slots.SetStable(slot)
+		return fmt.Errorf("target node %s not found", shortID(targetNodeID))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := c.drainSlot(ctx, slot, peer, 10*time.Second); err != nil {
+		c.slots.SetStable(slot)
+		return fmt.Errorf("migrate keys for slot %d: %w", slot, err)
+	}
+
+	// Finalize slot ownership.
+	c.slots.FinishMigration(slot, targetNodeID)
+
+	if err := c.BroadcastSlotOwnershipChange(slot, targetNodeID); err != nil {
+		log.Printf("[rebalance] Failed to broadcast slot %d ownership change: %v", slot, err)
+	}
+
+	return nil
+}
+
+func (c *Cluster) getPeerAddr(nodeID string) string {
+	nodes := c.GetNodes()
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			return n.Addr()
+		}
+	}
+	return ""
+}
+
+// StopRebalance stops the rebalance manager.
+func (c *Cluster) StopRebalance() {
+	if c.rebalanceMgr != nil {
+		c.rebalanceMgr.Stop()
+	}
 }
 
 // DrainSlots migrates all slots owned by this node to peer masters before shutdown.
@@ -303,6 +388,10 @@ func (c *Cluster) drainKey(ctx context.Context, key string, targetAddr string, t
 	}
 
 	return nil
+}
+
+func (c *Cluster) SetHotspotDetector(d *hotspot.Detector) {
+	c.gossip.SetHotspotDetector(d)
 }
 
 func (c *Cluster) GetSelf() *Node {
@@ -581,6 +670,10 @@ func gossipNodeToNode(gn *gossip.GossipNode) *Node {
 		PingSent:     gn.PingSent,
 		PongReceived: gn.PongReceived,
 		FailReports:  gn.FailReports,
+		Load: NodeLoadInfo{
+			TotalQPS:     gn.Load.TotalQPS,
+			HotSlotCount: gn.Load.HotSlotCount,
+		},
 	}
 }
 

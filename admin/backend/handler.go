@@ -46,6 +46,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux.Handle("/api/v1/command", chain(http.HandlerFunc(h.handleCommand)))
 	mux.Handle("/api/v1/replication/status", chain(http.HandlerFunc(h.handleReplicationStatus)))
 	mux.Handle("/api/v1/tiered/stats", chain(http.HandlerFunc(h.handleTieredStats)))
+	mux.Handle("/api/v1/hotspots", chain(http.HandlerFunc(h.handleHotspots)))
 	mux.Handle("/api/v1/audit", chain(http.HandlerFunc(h.handleAudit)))
 	mux.Handle("/api/v1/metrics/stream", chain(http.HandlerFunc(h.handleMetricsStream)))
 
@@ -57,6 +58,22 @@ func (h *HTTPHandler) Routes() http.Handler {
 
 func (h *HTTPHandler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *HTTPHandler) handleHotspots(w http.ResponseWriter, _ *http.Request) {
+	if h.deps.Hotspot == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"enabled":     false,
+			"hot_slots":   []interface{}{},
+			"sample_rate": "1s",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled":     true,
+		"hot_slots":   h.deps.Hotspot.HotSlots(),
+		"sample_rate": "1s",
+	})
 }
 
 func (h *HTTPHandler) handleNotImplemented(w http.ResponseWriter, _ *http.Request) {

@@ -21,6 +21,7 @@ import (
 	admin "github.com/10yihang/autocache/admin/backend"
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/hash"
+	"github.com/10yihang/autocache/internal/cluster/hotspot"
 	"github.com/10yihang/autocache/internal/cluster/state"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	"github.com/10yihang/autocache/internal/engine/tiered"
@@ -97,6 +98,8 @@ func main() {
 		}
 	}()
 
+	hotspotDetector := hotspot.New(hotspot.DefaultConfig())
+
 	var engine protocol.ProtocolEngine
 	var tieredMgr *tiered.Manager
 
@@ -149,6 +152,7 @@ func main() {
 
 	server := protocol.NewServer(*addr, engine)
 	server.SetQuietConnections(*quietConnections)
+	server.SetHotspotDetector(hotspotDetector)
 	var clusterInstance *cluster.Cluster
 	var stateManager *state.StateManager
 
@@ -208,6 +212,7 @@ func main() {
 			Store:     store,
 			Cluster:   clusterInstance,
 			Tiered:    tieredMgr,
+			Hotspot:   hotspotDetector,
 			Version:   internalversion.Version,
 			GoVersion: runtime.Version(),
 			StartedAt: time.Now(),
@@ -243,6 +248,8 @@ func main() {
 		}
 		cancel()
 	}
+
+	hotspotDetector.Stop()
 
 	if stateManager != nil {
 		if err := stateManager.Close(); err != nil {

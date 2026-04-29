@@ -9,6 +9,7 @@ import (
 	"github.com/tidwall/redcon"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	"github.com/10yihang/autocache/internal/cluster/hotspot"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
 )
 
@@ -43,6 +44,10 @@ func NewServer(addr string, engine ProtocolEngine) *Server {
 
 func (s *Server) SetCluster(c *cluster.Cluster) {
 	s.handler.SetCluster(c)
+}
+
+func (s *Server) SetHotspotDetector(d *hotspot.Detector) {
+	s.handler.SetHotspotDetector(d)
 }
 
 func (s *Server) SetQuietConnections(quiet bool) {

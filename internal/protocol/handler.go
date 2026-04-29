@@ -15,6 +15,8 @@ import (
 	"github.com/tidwall/redcon"
 
 	"github.com/10yihang/autocache/internal/cluster"
+	"github.com/10yihang/autocache/internal/cluster/hash"
+	"github.com/10yihang/autocache/internal/cluster/hotspot"
 	"github.com/10yihang/autocache/internal/cluster/replication"
 	"github.com/10yihang/autocache/internal/cluster/router"
 	"github.com/10yihang/autocache/internal/engine"
@@ -47,6 +49,8 @@ type Handler struct {
 	router         router.Router
 	applier        *replication.ReplicaApplier
 
+	hotspotDetector *hotspot.Detector
+
 	writeStateMu  sync.RWMutex
 	lastWriteSlot uint16
 	lastWriteLSN  uint64
@@ -61,6 +65,10 @@ func NewHandler(engine ProtocolEngine) *Handler {
 	h.registerCommands()
 	h.cmdMap = newCmdMap(h)
 	return h
+}
+
+func (h *Handler) SetHotspotDetector(d *hotspot.Detector) {
+	h.hotspotDetector = d
 }
 
 func (h *Handler) SetCluster(c *cluster.Cluster) {
@@ -213,6 +221,7 @@ func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes [
 	tracked := &trackedConn{Conn: conn}
 	fn(ctx, tracked, args)
 	record(!tracked.hadError)
+	h.recordHotspot(args)
 	clearAskingFlag(conn)
 }
 
@@ -280,6 +289,7 @@ func (h *Handler) Execute(ctx context.Context, conn redcon.Conn, cmd string, arg
 	tracked := &trackedConn{Conn: conn}
 	fn(ctx, tracked, args)
 	record(!tracked.hadError)
+	h.recordHotspot(args)
 	clearAskingFlag(conn)
 }
 
@@ -350,6 +360,20 @@ func (h *Handler) canAcceptWrite(cmd string, args [][]byte) bool {
 		return true
 	}
 	return h.clusterHandler.GetCluster().CanAcceptWrite(bytes.BytesToString(keys[0]))
+}
+
+func (h *Handler) recordHotspot(args [][]byte) {
+	if h.hotspotDetector == nil || len(args) == 0 {
+		return
+	}
+	key := bytes.BytesToString(args[0])
+	slot := hash.KeySlot(key)
+
+	size := 0
+	for _, a := range args {
+		size += len(a)
+	}
+	h.hotspotDetector.Record(slot, size)
 }
 
 func (h *Handler) applyReplicationWrite(ctx context.Context, key string, opType string, payload []byte, expireAtNs int64, apply func() error) error {

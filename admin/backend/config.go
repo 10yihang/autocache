@@ -4,6 +4,7 @@ import "time"
 
 type Config struct {
 	Addr            string
+	RedisAddr       string // RESP port for console command dispatch (default: 127.0.0.1:6379)
 	User            string
 	Password        string
 	AllowDangerous  bool
@@ -18,6 +19,9 @@ type Config struct {
 func (c *Config) applyDefaults() {
 	if c.Addr == "" {
 		c.Addr = "127.0.0.1:8080"
+	}
+	if c.RedisAddr == "" {
+		c.RedisAddr = "127.0.0.1:6379"
 	}
 	if c.MaxSSEConns <= 0 {
 		c.MaxSSEConns = 32

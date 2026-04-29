@@ -58,6 +58,9 @@ var (
 	adminPassword       = flag.String("admin-password", "", "admin UI Basic Auth password (plaintext or bcrypt $2a$/$2b$/$2y$)")
 	adminAllowDangerous = flag.Bool("admin-allow-dangerous", false, "allow admin UI write/mutate operations (FLUSHALL, key DELETE, etc.)")
 
+	// Memory flags
+	maxmemory = flag.String("maxmemory", "", "maximum memory for the hot store (default: no limit). Supports b/kb/mb/gb suffixes")
+
 	// Drain flags
 	drainTimeout = flag.Duration("drain-timeout", 90*time.Second, "max time for slot drain during graceful shutdown")
 	// Rebalance flags
@@ -91,7 +94,15 @@ func main() {
 		return
 	}
 
-	store := memory.NewStore(buildMemoryConfigFromConfig(fileConfig))
+	memCfg := buildMemoryConfigFromConfig(fileConfig)
+	if *maxmemory != "" {
+		bytes, err := parseMemoryBytes(*maxmemory)
+		if err != nil {
+			log.Fatalf("Invalid -maxmemory value %q: %v", *maxmemory, err)
+		}
+		memCfg.MaxMemory = bytes
+	}
+	store := memory.NewStore(memCfg)
 	store.SetSlotFunc(hash.KeySlot)
 	metrics2.InitInfo(internalversion.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	metricsExporter := metrics2.NewExporter(*metricsAddr)
@@ -211,8 +222,13 @@ func main() {
 
 	var adminServer *admin.Server
 	if *adminEnabled {
+		redisAddr := *addr
+		if strings.HasPrefix(redisAddr, ":") {
+			redisAddr = "127.0.0.1" + redisAddr
+		}
 		adminCfg := admin.Config{
 			Addr:           *adminAddr,
+			RedisAddr:      redisAddr,
 			User:           *adminUser,
 			Password:       *adminPassword,
 			AllowDangerous: *adminAllowDangerous,

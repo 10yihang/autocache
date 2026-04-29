@@ -9,11 +9,15 @@ import { Badge } from '../components/Badge.tsx'
 import { formatBytes, formatTimestamp } from '../api/format.ts'
 import './OpsPage.css'
 
+const COLLAPSE_SLOT_THRESHOLD = 10
+
 export function OpsPage() {
   const [replication, setReplication] = useState<ReplicationStatusResponse | null>(null)
   const [tiered, setTiered] = useState<TieredStatsResponse | null>(null)
   const [audit, setAudit] = useState<AuditResponse | null>(null)
   const [loading, setLoading] = useState(true)
+  const [slotsExpanded, setSlotsExpanded] = useState(false)
+  const [acksExpanded, setAcksExpanded] = useState(false)
 
   const loadAll = useCallback(() => {
     Promise.allSettled([
@@ -75,21 +79,32 @@ export function OpsPage() {
           <EmptyState title="Replication not active" description="Start with -cluster-enabled and replica nodes." />
         ) : (
           <>
-            <DataTable
-              columns={slotCols}
-              rows={(replication.slots ?? []) as SlotLogRow[]}
-              rowKey={(r) => String(r.slot)}
-              emptyMessage="No slot log entries"
-            />
+            <CollapsibleSlotSection
+              title="Slot Log"
+              count={(replication.slots ?? []).length}
+              expanded={slotsExpanded}
+              onToggle={() => setSlotsExpanded((v) => !v)}
+            >
+              <DataTable
+                columns={slotCols}
+                rows={(replication.slots ?? []) as SlotLogRow[]}
+                rowKey={(r) => String(r.slot)}
+                emptyMessage="No slot log entries"
+              />
+            </CollapsibleSlotSection>
             {(replication.acks ?? []).length > 0 && (
-              <>
-                <div className="ops-page__section-subtitle">Replica ACKs</div>
+              <CollapsibleSlotSection
+                title="Replica ACKs"
+                count={(replication.acks ?? []).length}
+                expanded={acksExpanded}
+                onToggle={() => setAcksExpanded((v) => !v)}
+              >
                 <DataTable
                   columns={ackCols}
                   rows={(replication.acks ?? []) as AckRow[]}
                   rowKey={(r) => `${r.slot}-${r.node_id}`}
                 />
-              </>
+              </CollapsibleSlotSection>
             )}
           </>
         )}
@@ -150,6 +165,44 @@ export function OpsPage() {
           emptyMessage="No audit entries"
         />
       </div>
+    </div>
+  )
+}
+
+function CollapsibleSlotSection({
+  title,
+  count,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string
+  count: number
+  expanded: boolean
+  onToggle: () => void
+  children: React.ReactNode
+}) {
+  const many = count > COLLAPSE_SLOT_THRESHOLD
+
+  return (
+    <div className="collapsible-section">
+      <button
+        type="button"
+        className="collapsible-section__toggle"
+        onClick={many ? onToggle : undefined}
+        disabled={!many}
+        aria-expanded={!many || expanded}
+      >
+        <span className="collapsible-section__title">
+          {title} <span className="collapsible-section__count">({count})</span>
+        </span>
+        {many && (
+          <span className={`collapsible-section__chevron ${expanded ? 'is-open' : ''}`}>
+            ▸
+          </span>
+        )}
+      </button>
+      {(expanded || !many) && children}
     </div>
   )
 }

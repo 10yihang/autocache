@@ -214,6 +214,21 @@ export interface AuditResponse {
   entries: AuditEntry[]
 }
 
+export interface CommandResponse {
+  command: string
+  result: string
+}
+
+export async function executeCommand(cmd: string): Promise<CommandResponse> {
+  const parts = cmd.trim().split(/\s+/)
+  const command = parts[0].toUpperCase()
+  const args = parts.slice(1)
+  return apiFetch<CommandResponse>('/api/v1/command', {
+    method: 'POST',
+    body: JSON.stringify({ command, args }),
+  })
+}
+
 export interface MetricsSnapshot {
   timestamp: number
   goroutines: number

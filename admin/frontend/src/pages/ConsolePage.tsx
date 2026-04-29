@@ -1,19 +1,15 @@
 import { useState, useRef, useEffect } from 'react'
+import { executeCommand } from '../api/client'
 import './ConsolePage.css'
 
 const BANNER = [
   '──────────────────────────────────────────────',
   '  AutoCache Admin Console',
-  '  Command dispatch via Wave 4 in-process RESP',
+  '  Redis RESP protocol over HTTP bridge',
   '──────────────────────────────────────────────',
   '',
-  '  Console requires in-process RESP dispatch',
-  '  (Wave 4 work). For now, use redis-cli:',
-  '',
-  '    redis-cli -p 6379 PING',
-  '    redis-cli -p 6379 INFO server',
-  '',
-  '  The UI is fully built; wiring lands in Wave 4.',
+  '  Type any Redis command below.',
+  '  Examples: PING, SET key val, GET key',
   '──────────────────────────────────────────────',
 ]
 
@@ -29,24 +25,32 @@ export function ConsolePage() {
   )
   const [history, setHistory] = useState<string[]>([])
   const [histIdx, setHistIdx] = useState(-1)
+  const [running, setRunning] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [lines])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim()) return
+    if (!input.trim() || running) return
     const cmd = input.trim()
-    setLines((prev) => [
-      ...prev,
-      { text: `> ${cmd}`, type: 'input' },
-      { text: '(Not implemented) Wave 4 will wire command dispatch via protocol.Handler.', type: 'error' },
-    ])
+    setLines((prev) => [...prev, { text: `> ${cmd}`, type: 'input' }])
     setHistory((prev) => [cmd, ...prev].slice(0, 100))
     setHistIdx(-1)
     setInput('')
+    setRunning(true)
+
+    try {
+      const res = await executeCommand(cmd)
+      setLines((prev) => [...prev, { text: res.result || '(nil)', type: 'output' }])
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setLines((prev) => [...prev, { text: `(error) ${msg}`, type: 'error' }])
+    } finally {
+      setRunning(false)
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -79,12 +83,15 @@ export function ConsolePage() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="PING"
+          placeholder={running ? 'Running...' : 'PING'}
           autoFocus
           spellCheck={false}
           autoComplete="off"
+          disabled={running}
         />
-        <button type="submit" className="btn btn--primary">Send</button>
+        <button type="submit" className="btn btn--primary" disabled={running}>
+          Send
+        </button>
       </form>
     </div>
   )

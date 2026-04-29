@@ -1,9 +1,9 @@
 // Package hotspot provides per-slot hotspot detection for the cluster.
-// Uses EWMA + 3-sigma threshold to identify slots with abnormally high load.
+// Tracks per-slot QPS via atomic counters and flags slots whose current
+// QPS significantly exceeds the cluster-wide average.
 package hotspot
 
 import (
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,38 +14,41 @@ const (
 	slotCount      = 16384
 	sampleInterval = time.Second
 
-	// EWMA decay factor — responds to changes within ~10 seconds.
+	// EWMA decay factor for per-slot QPS baseline.
 	avgAlpha = 0.1
-	// EWMA decay factor for variance — slower to stabilize.
-	varBeta = 0.05
-	// 3-sigma threshold multiplier.
-	sigmaThreshold = 3.0
-	// Absolute minimum QPS to flag a slot as hot (avoids noise in idle clusters).
+	// Multiplier over cluster average to flag a slot as hot.
+	// A slot needs QPS > avgQPS * hotMultiplier to be considered hot.
+	hotMultiplier = 3.0
+	// Absolute minimum QPS per slot to avoid noise in idle clusters.
 	minHotQPS = 100
+	// Number of sample windows to collect before emitting hotspots.
+	samplesWarmup = 10
 	// Maximum number of hot slots to report.
 	maxHotSlots = 20
 )
 
 // HotSlotInfo describes a detected hot slot.
 type HotSlotInfo struct {
-	Slot       uint16  `json:"slot"`
-	QPS        float64 `json:"qps"`
-	AvgQPS     float64 `json:"avg_qps"`
-	StdDev     float64 `json:"stddev"`
-	Score      float64 `json:"score"` // sigmas above mean
-	Bandwidth  float64 `json:"bandwidth_bps"`
+	Slot      uint16  `json:"slot"`
+	QPS       float64 `json:"qps"`
+	AvgQPS    float64 `json:"avg_qps"`   // cluster-wide average QPS per slot
+	Score     float64 `json:"score"`     // QPS / AvgQPS
+	Bandwidth float64 `json:"bandwidth_bps"`
 }
 
-// Detector tracks per-slot QPS and identifies hot spots using EWMA + sigma analysis.
+// Detector tracks per-slot QPS and identifies hot spots by comparing
+// each slot against the cluster-wide average.
 type Detector struct {
 	slots [slotCount]slotStat
 
-	ticker  *time.Ticker
-	done    chan struct{}
-	wg      sync.WaitGroup
+	ticker *time.Ticker
+	done   chan struct{}
+	wg     sync.WaitGroup
 
 	mu       sync.RWMutex
 	hotSlots []HotSlotInfo
+
+	ticks uint64
 }
 
 type slotStat struct {
@@ -53,17 +56,14 @@ type slotStat struct {
 	bytes    atomic.Uint64
 
 	avgReq  float64
-	varReq  float64
 	avgByte float64
-	varByte float64
 }
 
 // Config holds detector configuration.
 type Config struct {
 	SampleInterval time.Duration
 	AvgAlpha       float64
-	VarBeta        float64
-	SigmaThreshold float64
+	HotMultiplier  float64
 	MinHotQPS      float64
 	MaxHotSlots    int
 }
@@ -73,8 +73,7 @@ func DefaultConfig() Config {
 	return Config{
 		SampleInterval: sampleInterval,
 		AvgAlpha:       avgAlpha,
-		VarBeta:        varBeta,
-		SigmaThreshold: sigmaThreshold,
+		HotMultiplier:  hotMultiplier,
 		MinHotQPS:      minHotQPS,
 		MaxHotSlots:    maxHotSlots,
 	}
@@ -92,7 +91,7 @@ func New(cfg Config) *Detector {
 }
 
 // Record registers a request against the given slot with its payload size.
-// Hot-path: two atomic adds, lock-free, ~10 ns overhead.
+// Hot-path: two atomic adds, lock-free.
 func (d *Detector) Record(slot uint16, sizeBytes int) {
 	if slot >= slotCount {
 		return
@@ -127,70 +126,80 @@ func (d *Detector) loop(cfg Config) {
 		case <-d.done:
 			return
 		case <-d.ticker.C:
+			d.ticks++
 			d.sampleAndDetect(cfg)
 		}
 	}
 }
 
 func (d *Detector) sampleAndDetect(cfg Config) {
-	var candidates []HotSlotInfo
+	// First pass: collect per-slot QPS, update EWMAs, compute cluster average.
+	var totalQPS float64
+	activeSlots := 0
+	slotQPS := make([]float64, slotCount)
+	slotBPS := make([]float64, slotCount)
 
 	for i := range slotCount {
 		req := d.slots[i].requests.Swap(0)
 		b := d.slots[i].bytes.Swap(0)
 		if req == 0 {
-			// Idle slot: apply decay without new input.
+			// Idle slot: decay EWMA and skip.
 			d.slots[i].avgReq *= (1 - cfg.AvgAlpha)
-			d.slots[i].varReq *= (1 - cfg.VarBeta)
 			d.slots[i].avgByte *= (1 - cfg.AvgAlpha)
-			d.slots[i].varByte *= (1 - cfg.VarBeta)
 			continue
 		}
 
 		qps := float64(req)
 		bps := float64(b)
 
-		// Update QPS EWMA.
-		oldAvg := d.slots[i].avgReq
-		newAvg := cfg.AvgAlpha*qps + (1-cfg.AvgAlpha)*oldAvg
-		d.slots[i].avgReq = newAvg
+		d.slots[i].avgReq = cfg.AvgAlpha*qps + (1-cfg.AvgAlpha)*d.slots[i].avgReq
+		d.slots[i].avgByte = cfg.AvgAlpha*bps + (1-cfg.AvgAlpha)*d.slots[i].avgByte
 
-		// Update QPS variance EWMA.
-		dev := qps - newAvg
-		newVar := cfg.VarBeta*dev*dev + (1-cfg.VarBeta)*d.slots[i].varReq
-		d.slots[i].varReq = newVar
+		slotQPS[i] = qps
+		slotBPS[i] = bps
+		totalQPS += qps
+		activeSlots++
+	}
 
-		// Update byte rate EWMA.
-		oldByteAvg := d.slots[i].avgByte
-		newByteAvg := cfg.AvgAlpha*bps + (1-cfg.AvgAlpha)*oldByteAvg
-		d.slots[i].avgByte = newByteAvg
+	// Skip emission during warmup.
+	if d.ticks <= samplesWarmup {
+		return
+	}
 
-		// Update byte variance EWMA.
-		byteDev := bps - newByteAvg
-		newByteVar := cfg.VarBeta*byteDev*byteDev + (1-cfg.VarBeta)*d.slots[i].varByte
-		d.slots[i].varByte = newByteVar
+	if activeSlots == 0 {
+		d.mu.Lock()
+		d.hotSlots = nil
+		d.mu.Unlock()
+		return
+	}
 
-		// Detect hotspot.
-		stdDev := math.Sqrt(newVar)
-		if newAvg < cfg.MinHotQPS {
+	avgQPS := totalQPS / float64(activeSlots)
+	if avgQPS < cfg.MinHotQPS {
+		d.mu.Lock()
+		d.hotSlots = nil
+		d.mu.Unlock()
+		return
+	}
+
+	// Second pass: flag slots significantly above cluster average.
+	var candidates []HotSlotInfo
+	for i := range slotCount {
+		if slotQPS[i] <= 0 {
 			continue
 		}
-		if qps <= newAvg+cfg.SigmaThreshold*stdDev {
+		if slotQPS[i] <= avgQPS*cfg.HotMultiplier {
 			continue
 		}
-
-		score := (qps - newAvg) / stdDev
 		candidates = append(candidates, HotSlotInfo{
 			Slot:      uint16(i),
-			QPS:       qps,
-			AvgQPS:    newAvg,
-			StdDev:    stdDev,
-			Score:     score,
-			Bandwidth: bps,
+			QPS:       slotQPS[i],
+			AvgQPS:    avgQPS,
+			Score:     slotQPS[i] / avgQPS,
+			Bandwidth: slotBPS[i],
 		})
 	}
 
-	// Sort by score descending, keep top K.
+	// Sort by score descending, cap.
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].Score > candidates[j].Score
 	})

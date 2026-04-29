@@ -33,6 +33,8 @@ func (a *testSlotAssigner) AssignSlot(slot uint16, nodeID string) error {
 	return nil
 }
 
+func (a *testSlotAssigner) AddSlotReplica(slot uint16, replicaID string) {}
+
 func TestBroadcastSlotOwnershipUnknownOwner(t *testing.T) {
 	slots := &testSlotAssigner{
 		nodeSlots: map[string][]uint16{},
@@ -78,7 +80,7 @@ func TestProcessNodeInfoRejectsStaleSlotOwnership(t *testing.T) {
 		Flags:       NodeFlagMaster,
 		ConfigEpoch: 4,
 		Slots:       SlotsToBytes([]uint16{12}),
-	})
+	}, true)
 
 	if got := slots.GetSlotNode(12); got != "node-new" {
 		t.Fatalf("slot owner = %s, want node-new", got)
@@ -102,7 +104,7 @@ func TestProcessNodeInfoAcceptsNewerSlotOwnership(t *testing.T) {
 		Flags:       NodeFlagMaster,
 		ConfigEpoch: 3,
 		Slots:       SlotsToBytes([]uint16{13}),
-	})
+	}, true)
 
 	if got := slots.GetSlotNode(13); got != "node-new" {
 		t.Fatalf("slot owner = %s, want node-new", got)

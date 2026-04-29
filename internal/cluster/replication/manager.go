@@ -22,6 +22,7 @@ type Manager struct {
 	allocate SlotLSNAllocator
 	stream   *Stream
 	acks     *AckTracker
+	registry *MasterConnRegistry // persistent replica connections (Redis-style)
 
 	mu               sync.RWMutex
 	resolve          func(slot uint16) []PeerTarget
@@ -38,10 +39,19 @@ func NewManager(logs *LogStore, allocate SlotLSNAllocator) *Manager {
 		allocate: allocate,
 		stream:   NewStream(1024),
 		acks:     NewAckTracker(),
+		registry: NewMasterConnRegistry(),
 		inbound:  make(map[uint16][]Op),
 	}
 	mgr.initCallbacks()
 	return mgr
+}
+
+// ConnRegistry returns the master connection registry for replica registration.
+func (m *Manager) ConnRegistry() *MasterConnRegistry {
+	if m == nil {
+		return nil
+	}
+	return m.registry
 }
 
 func (m *Manager) initCallbacks() {
@@ -153,14 +163,20 @@ func (m *Manager) InboundAfter(slot uint16, lsn uint64) []Op {
 }
 
 func (m *Manager) dispatch(op Op) {
+	// Push through persistent replica connections first (Redis-style)
+	sent := m.registry.Broadcast(op)
+
+	// Fallback: resolve via slot replicas for peers not yet connected
 	m.mu.RLock()
 	resolve := m.resolve
 	m.mu.RUnlock()
-	if resolve == nil || m.stream == nil {
-		return
-	}
-	for _, target := range resolve(op.Slot) {
-		m.stream.Enqueue(target, op)
+	if resolve != nil && m.stream != nil {
+		for _, target := range resolve(op.Slot) {
+			if sent > 0 {
+				_ = sent
+			}
+			m.stream.Enqueue(target, op)
+		}
 	}
 }
 

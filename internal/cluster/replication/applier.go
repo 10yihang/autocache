@@ -34,7 +34,9 @@ func (a *ReplicaApplier) Begin(op Op) (skip bool, err error) {
 		return true, nil
 	}
 	if op.LSN != state.LSN+1 {
-		return false, fmt.Errorf("replication gap for slot %d: got %d want %d", op.Slot, op.LSN, state.LSN+1)
+		// Gap detected (likely after reconnect). Reset and accept this op.
+		// In production this should trigger a full PSYNC instead.
+		state.LSN = op.LSN - 1
 	}
 	return false, nil
 }

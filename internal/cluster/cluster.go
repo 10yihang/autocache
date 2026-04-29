@@ -61,6 +61,8 @@ type Cluster struct {
 	engine         DrainEngine
 	drainTimeout   time.Duration
 	rebalanceMgr   *rebalance.Manager
+
+	onReplicate func(masterAddr, replicaID string) // callback to start ReplicaClient
 }
 
 type Config struct {
@@ -538,6 +540,65 @@ func (c *Cluster) GetMigratingSlots() map[uint16]state.MigrationState {
 
 func (c *Cluster) GetSlotReplicationState() map[uint16]state.SlotReplicaSet {
 	return c.slots.GetSlotReplicationState()
+}
+
+// ReplicateTo makes this node a replica of the specified master node.
+// It configures all slots owned by master as replicated to self.
+func (c *Cluster) ReplicateTo(masterNodeID string) error {
+	c.mu.Lock()
+	node := c.gossip.GetNode(masterNodeID)
+	if node == nil {
+		c.mu.Unlock()
+		return fmt.Errorf("master node %s not known", masterNodeID)
+	}
+	if node.Role != gossip.NodeRoleMaster {
+		c.mu.Unlock()
+		return fmt.Errorf("node %s is not a master", masterNodeID)
+	}
+	c.mu.Unlock()
+
+	selfID := c.self.ID
+
+	// Set self role to replica
+	c.self.Role = NodeRoleReplica
+	c.self.MasterID = masterNodeID
+	c.gossip.SetSelfRole(gossip.NodeRoleReplica, masterNodeID)
+
+	// Increment epoch for this reconfiguration
+	c.IncrementEpoch()
+	epoch := c.GetCurrentEpoch()
+
+	// Add self as replica for all slots owned by master
+	count, err := c.slots.AddReplicaToMaster(masterNodeID, selfID, epoch)
+	if err != nil {
+		return err
+	}
+	log.Printf("Configured replication: %d slots of master %s now replicated to self (%s)", count, masterNodeID, selfID)
+
+	// Start persistent replica→master connection (Redis-style replication).
+	if c.onReplicate != nil {
+		c.onReplicate(node.Addr(), selfID)
+	}
+	return nil
+}
+
+// SetOnReplicate sets a callback that is invoked after a successful CLUSTER REPLICATE
+// to start the persistent replica→master connection.
+func (c *Cluster) SetOnReplicate(fn func(masterAddr, replicaID string)) {
+	c.onReplicate = fn
+}
+
+// MasterAddr returns the address of the master this node replicates, if any.
+func (c *Cluster) GetMasterAddr() string {
+	masterID := c.self.MasterID
+	if masterID == "" {
+		return ""
+	}
+	node := c.gossip.GetNode(masterID)
+	if node == nil {
+		return ""
+	}
+	return node.Addr()
 }
 
 func (c *Cluster) GetReplicationManager() *replication.Manager {

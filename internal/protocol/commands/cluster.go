@@ -63,11 +63,30 @@ func (h *ClusterHandler) HandleCluster(conn redcon.Conn, args [][]byte) {
 		h.clusterCountKeysInSlot(conn, args[1:])
 	case "PSYNC":
 		h.clusterPSync(conn, args[1:])
+	case "REPLICATE":
+		h.clusterReplicate(conn, args[1:])
 	case "FAILOVER":
 		h.clusterFailover(conn, args[1:])
 	default:
 		conn.WriteError("ERR unknown subcommand '" + subcmd + "'")
 	}
+}
+
+func (h *ClusterHandler) clusterReplicate(conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'cluster replicate' command")
+		return
+	}
+	masterID := bytes.BytesToString(args[0])
+	if masterID == "" {
+		conn.WriteError("ERR invalid master node ID")
+		return
+	}
+	if err := h.cluster.ReplicateTo(masterID); err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
+	conn.WriteString("OK")
 }
 
 func (h *ClusterHandler) clusterFailover(conn redcon.Conn, args [][]byte) {

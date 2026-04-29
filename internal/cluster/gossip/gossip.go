@@ -131,6 +131,7 @@ type SlotAssigner interface {
 	GetSlotNode(slot uint16) string
 	GetSlotConfigEpoch(slot uint16) uint64
 	AssignSlot(slot uint16, nodeID string) error
+	AddSlotReplica(slot uint16, replicaID string)
 }
 
 type Gossip struct {
@@ -235,7 +236,7 @@ func (g *Gossip) Meet(addr string) error {
 	}
 
 	if resp.Type == MsgPong && resp.NodeInfo != nil {
-		g.processNodeInfo(resp.NodeInfo)
+		g.processNodeInfo(resp.NodeInfo, true) // first-hand from meet response
 	}
 
 	conn.Close()
@@ -288,11 +289,11 @@ func (g *Gossip) handleConnection(conn net.Conn) {
 
 func (g *Gossip) handlePing(conn net.Conn, msg *Message) {
 	if msg.NodeInfo != nil {
-		g.processNodeInfo(msg.NodeInfo)
+		g.processNodeInfo(msg.NodeInfo, true) // first-hand report from sender
 	}
 
 	for _, info := range msg.GossipNodes {
-		g.processNodeInfo(info)
+		g.processNodeInfo(info, false) // second-hand gossip
 	}
 
 	pong := NewPongMessage(g.self.ID, g.selfNodeInfo(), g.randomGossipNodes())
@@ -312,11 +313,11 @@ func (g *Gossip) handlePong(msg *Message) {
 	g.nodesMu.Unlock()
 
 	if msg.NodeInfo != nil {
-		g.processNodeInfo(msg.NodeInfo)
+		g.processNodeInfo(msg.NodeInfo, true) // first-hand report from sender
 	}
 
 	for _, info := range msg.GossipNodes {
-		g.processNodeInfo(info)
+		g.processNodeInfo(info, false) // second-hand gossip
 	}
 }
 
@@ -334,7 +335,7 @@ func (g *Gossip) handleFail(msg *Message) {
 	}
 }
 
-func (g *Gossip) processNodeInfo(info *NodeInfo) {
+func (g *Gossip) processNodeInfo(info *NodeInfo, direct bool) {
 	g.nodesMu.Lock()
 	defer g.nodesMu.Unlock()
 
@@ -358,16 +359,29 @@ func (g *Gossip) processNodeInfo(info *NodeInfo) {
 	}
 
 	node.mu.Lock()
-	if info.Flags&NodeFlagMaster != 0 {
-		node.Role = NodeRoleMaster
-	} else if info.Flags&NodeFlagReplica != 0 {
-		node.Role = NodeRoleReplica
-		node.MasterID = info.MasterID
+	// Only trust role/master from the node's own report, never from second-hand gossip.
+	if direct {
+		if info.Flags&NodeFlagMaster != 0 {
+			node.Role = NodeRoleMaster
+			node.MasterID = ""
+		} else if info.Flags&NodeFlagReplica != 0 {
+			node.Role = NodeRoleReplica
+			node.MasterID = info.MasterID
+		}
 	}
 	isMaster := node.Role == NodeRoleMaster
 	node.Load.TotalQPS = info.Load.TotalQPS
 	node.Load.HotSlotCount = info.Load.HotSlotCount
 	node.mu.Unlock()
+
+	// If a node reports itself as a replica of this node, register it locally
+	// so the master knows to push replication ops to it.
+	if direct && info.MasterID != "" && info.MasterID == g.self.ID {
+		mySlots := g.slots.GetNodeSlots(g.self.ID)
+		for _, slot := range mySlots {
+			g.slots.AddSlotReplica(slot, info.ID)
+		}
+	}
 
 	if len(info.Slots) > 0 && isMaster {
 		slots := BytesToSlots(info.Slots)
@@ -831,6 +845,14 @@ func (g *Gossip) SetEventHandlers(onJoin, onLeave func(*GossipNode), onSlotChang
 	g.onNodeJoin = onJoin
 	g.onNodeLeave = onLeave
 	g.onSlotChange = onSlotChange
+}
+
+// SetSelfRole changes the role of the local node and propagates the change.
+func (g *Gossip) SetSelfRole(role NodeRole, masterID string) {
+	g.self.mu.Lock()
+	g.self.Role = role
+	g.self.MasterID = masterID
+	g.self.mu.Unlock()
 }
 
 func (g *Gossip) writeMessage(conn net.Conn, data []byte) error {

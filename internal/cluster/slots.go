@@ -150,6 +150,65 @@ func (sm *SlotManager) ConfigureReplication(slot uint16, primaryID string, repli
 	return nil
 }
 
+// AddSlotReplica adds replicaID as a replica for a specific slot (if we own it).
+// This is called when gossip discovers a node that claims to be our replica.
+func (sm *SlotManager) AddSlotReplica(slot uint16, replicaID string) {
+	if slot >= hash.SlotCount || replicaID == "" {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	info := sm.slots[slot]
+	if info.NodeID == "" {
+		return
+	}
+	for _, r := range info.Replicas {
+		if r.NodeID == replicaID {
+			return // already present
+		}
+	}
+	info.Replicas = append(info.Replicas, SlotReplica{NodeID: replicaID, Healthy: true})
+	sm.markDirty()
+}
+
+// AddReplicaToMaster adds replicaID as a replica for every slot owned by masterID.
+func (sm *SlotManager) AddReplicaToMaster(masterID string, replicaID string, epoch uint64) (int, error) {
+	if masterID == "" || replicaID == "" || masterID == replicaID {
+		return 0, fmt.Errorf("invalid master/replica IDs")
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	count := 0
+	for slot := uint16(0); slot < hash.SlotCount; slot++ {
+		info := sm.slots[slot]
+		if info.NodeID != masterID {
+			continue
+		}
+		// Set primary ID
+		info.PrimaryID = masterID
+		info.ConfigEpoch = epoch
+		// Add replica if not already present
+		already := false
+		for _, r := range info.Replicas {
+			if r.NodeID == replicaID {
+				r.Healthy = true
+				already = true
+				break
+			}
+		}
+		if !already {
+			info.Replicas = append(info.Replicas, SlotReplica{NodeID: replicaID, Healthy: true})
+		}
+		count++
+	}
+	if count > 0 {
+		sm.markDirty()
+	}
+	return count, nil
+}
+
 func (sm *SlotManager) AllocateLSN(slot uint16) (uint64, uint64, error) {
 	if slot >= hash.SlotCount {
 		return 0, 0, fmt.Errorf("invalid slot: %d", slot)

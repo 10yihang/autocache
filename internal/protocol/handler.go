@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"strconv"
@@ -71,10 +72,24 @@ func (h *Handler) SetHotspotDetector(d *hotspot.Detector) {
 	h.hotspotDetector = d
 }
 
+// StartReplicaClient establishes a persistent TCP connection to the master
+// for receiving replication ops (Redis-style replication).
+func (h *Handler) StartReplicaClient(masterAddr string, replicaID string) {
+	client := replication.NewReplicaClient(masterAddr, replicaID, func(op replication.Op) error {
+		return h.applyIncomingReplicationOp(context.Background(), op)
+	})
+	client.Start()
+	log.Printf("Replica client started, connecting to master at %s", masterAddr)
+}
+
 func (h *Handler) SetCluster(c *cluster.Cluster) {
 	h.clusterHandler = commands.NewClusterHandler(c, h.engine)
 	h.router = router.NewClusterRouter(c)
 	h.clusterEnabled = true
+	// Wire up the replica→master persistent connection callback (Redis-style replication)
+	c.SetOnReplicate(func(masterAddr, replicaID string) {
+		h.StartReplicaClient(masterAddr, replicaID)
+	})
 }
 
 func (h *Handler) registerCommands() {
@@ -151,6 +166,7 @@ func (h *Handler) registerCommands() {
 	h.commands["RESTORE"] = h.cmdRestore
 	h.commands["MIGRATE"] = h.cmdMigrate
 	h.commands["REPLAPPLY"] = h.cmdReplApply
+	h.commands["REGREPLICA"] = h.cmdRegReplica
 	h.commands["WAIT"] = h.cmdWait
 }
 
@@ -428,6 +444,7 @@ func decodeReplicationPayload(payload []byte) []string {
 }
 
 func (h *Handler) applyIncomingReplicationOp(ctx context.Context, op replication.Op) error {
+	// Debug: log.Printf("applyIncomingReplicationOp: slot=%d epoch=%d lsn=%d type=%s key=%s payload=%d", ...)
 	if h.applier == nil {
 		h.applier = replication.NewReplicaApplier()
 	}
@@ -1895,6 +1912,44 @@ func (h *Handler) cmdMigrate(ctx context.Context, conn redcon.Conn, args [][]byt
 	}
 
 	conn.WriteString("OK")
+}
+
+// cmdRegReplica handles REGREPLICA <replica-id>.
+// The replica establishes a persistent TCP connection to the master and sends this
+// command to register itself. The master detaches the connection from the RESP
+// event loop and uses it exclusively for pushing REPLAPPLY ops (Redis-style replication).
+func (h *Handler) cmdRegReplica(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 1 {
+		conn.WriteError("ERR wrong number of arguments for 'regreplica' command")
+		return
+	}
+	replicaID := bytes.BytesToString(args[0])
+
+	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
+		conn.WriteError("ERR cluster is required")
+		return
+	}
+
+	mgr := h.clusterHandler.GetCluster().GetReplicationManager()
+	if mgr == nil {
+		conn.WriteError("ERR replication manager not configured")
+		return
+	}
+
+	// Send OK before detaching
+	conn.WriteString("OK")
+
+	// Detach the connection from redcon's event loop
+	dconn := conn.Detach()
+	if err := dconn.Flush(); err != nil {
+		log.Printf("REGREPLICA flush failed for %s: %v", replicaID, err)
+		dconn.Close()
+		return
+	}
+
+	// Register the raw TCP connection for persistent push
+	mgr.ConnRegistry().Register(replicaID, dconn.NetConn(), dconn)
+	log.Printf("Replica %s registered via persistent connection", replicaID)
 }
 
 func (h *Handler) cmdReplApply(_ context.Context, conn redcon.Conn, args [][]byte) {

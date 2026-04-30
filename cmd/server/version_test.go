@@ -10,7 +10,6 @@ func TestVersionFlagPrintsVersionAndExits(t *testing.T) {
 	t.Parallel()
 
 	cmd := exec.Command("go", "run", ".", "-v")
-	cmd.Dir = "/Users/huangyihang/Code/autocache/cmd/server"
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go run . -v failed: %v\noutput:\n%s", err, out)
@@ -41,7 +40,6 @@ func TestVersionFlagRespectsInjectedVersion(t *testing.T) {
 	t.Parallel()
 
 	cmd := exec.Command("go", "run", "-ldflags", "-X github.com/10yihang/autocache/internal/version.Version=v1.2.3-test", ".", "-v")
-	cmd.Dir = "/Users/huangyihang/Code/autocache/cmd/server"
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go run with injected version failed: %v\noutput:\n%s", err, out)

@@ -46,10 +46,17 @@ var (
 	showVersionLong  = flag.Bool("version", false, "print version and exit")
 
 	// Tiered storage flags
-	tieredEnabled = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
-	badgerPath    = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
-	persistEnabled = flag.Bool("persist-enabled", false, "enable async write-behind persistence to Badger (requires tiered-enabled)")
-	metricsAddr   = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
+	tieredEnabled     = flag.Bool("tiered-enabled", false, "enable tiered storage (memory + badger SSD)")
+	badgerPath        = flag.String("badger-path", "", "path for badger warm tier (default: <data-dir>/warm)")
+	persistEnabled    = flag.Bool("persist-enabled", false, "enable async write-behind persistence to Badger (requires tiered-enabled)")
+	windowPct         = flag.Int("tiered-window-pct", 1, "W-TinyLFU window cache percentage")
+	protectedPct      = flag.Int("tiered-protected-pct", 80, "W-TinyLFU protected segment percentage")
+	demoteThreshold   = flag.Float64("tiered-demote-threshold", -0.5, "warm-to-cold demote utility threshold")
+	costAccessWeight  = flag.Float64("tiered-cost-access-weight", 1.0, "cost model access frequency weight")
+	costRecencyWeight = flag.Float64("tiered-cost-recency-weight", 0.4, "cost model recency weight")
+	costSizePenalty   = flag.Float64("tiered-cost-size-penalty", 0.2, "cost model size penalty weight")
+	costWritePenalty  = flag.Float64("tiered-cost-write-penalty", 0.2, "cost model write penalty weight")
+	metricsAddr       = flag.String("metrics-addr", ":9121", "Prometheus metrics listen address")
 
 	// Admin UI flags
 	adminEnabled        = flag.Bool("admin-enabled", false, "enable built-in admin web UI")
@@ -134,6 +141,16 @@ func main() {
 			HotAccessThreshold: 10,
 			HotIdleThreshold:   5 * time.Minute,
 			ColdIdleThreshold:  2 * time.Hour,
+			PolicyConfig: &tiered.WTinyLFUCostAwareConfig{
+				HotCapacity:               1024,
+				WindowPercentage:          *windowPct,
+				ProtectedPercentage:       *protectedPct,
+				WarmToColdDemoteThreshold: *demoteThreshold,
+				CostAccessWeight:          *costAccessWeight,
+				CostRecencyWeight:         *costRecencyWeight,
+				CostSizePenaltyWeight:     *costSizePenalty,
+				CostWritePenaltyWeight:    *costWritePenalty,
+			},
 		}
 
 		var err error
@@ -167,6 +184,15 @@ func main() {
 	server := protocol.NewServer(*addr, engine)
 	server.SetQuietConnections(*quietConnections)
 	server.SetHotspotDetector(hotspotDetector)
+
+	if *persistEnabled && tieredMgr != nil {
+		sw := persistence.NewSnapshotWriter(*dataDir)
+		server.SetSnapshotWriter(sw)
+		if wb := tieredMgr.GetWriteBehind(); wb != nil {
+			server.SetWriteBehind(wb)
+		}
+	}
+
 	var clusterInstance *cluster.Cluster
 	var stateManager *state.StateManager
 
@@ -212,12 +238,12 @@ func main() {
 		}
 
 		log.Printf("Cluster mode enabled, node ID: %s", clusterInstance.GetSelf().ID)
-			clusterInstance.SetEngine(store)
-			clusterInstance.SetDrainTimeout(*drainTimeout)
-			if *autoRebalance {
-				clusterInstance.InitRebalance(hotspotDetector, rebalance.DefaultConfig())
-				log.Println("Auto-rebalance enabled")
-			}
+		clusterInstance.SetEngine(store)
+		clusterInstance.SetDrainTimeout(*drainTimeout)
+		if *autoRebalance {
+			clusterInstance.InitRebalance(hotspotDetector, rebalance.DefaultConfig())
+			log.Println("Auto-rebalance enabled")
+		}
 	}
 
 	var adminServer *admin.Server

@@ -240,6 +240,21 @@ func (sc *StatsCollector) GetHotKeys(countThreshold uint64) []string {
 	return hotKeys
 }
 
+// maybePrune removes stale entries when the stats map grows too large.
+// Caller must hold sc.mu write lock.
+func (sc *StatsCollector) maybePrune() {
+	const maxEntries = 100000
+	if len(sc.stats) <= maxEntries {
+		return
+	}
+	cutoff := time.Now().Add(-1 * time.Hour).UnixNano()
+	for key, s := range sc.stats {
+		if s.LastAccessTime < cutoff {
+			delete(sc.stats, key)
+		}
+	}
+}
+
 // decayLoop regularly decays access counts
 func (sc *StatsCollector) decayLoop() {
 	defer sc.wg.Done()
@@ -270,6 +285,8 @@ func (sc *StatsCollector) decay() {
 
 	// Reset sketch
 	sc.sketch.Reset()
+
+	sc.maybePrune()
 }
 
 // Stop stops the collector
@@ -282,7 +299,7 @@ func (sc *StatsCollector) Stop() {
 
 // CountMinSketch implementation
 type CountMinSketch struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	matrix [][]uint8
 	width  int
 	depth  int
@@ -315,8 +332,8 @@ func (c *CountMinSketch) Increment(key string) {
 
 // Estimate estimates frequency
 func (c *CountMinSketch) Estimate(key string) uint8 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	min := uint8(255)
 	for i := 0; i < c.depth; i++ {
 		idx := c.hash(key, i) % c.width

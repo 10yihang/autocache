@@ -23,6 +23,7 @@ import (
 	"github.com/10yihang/autocache/internal/engine"
 	"github.com/10yihang/autocache/internal/engine/memory"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
+	"github.com/10yihang/autocache/internal/persistence"
 	"github.com/10yihang/autocache/internal/protocol/commands"
 	"github.com/10yihang/autocache/pkg/bytes"
 	pkgerrors "github.com/10yihang/autocache/pkg/errors"
@@ -52,6 +53,9 @@ type Handler struct {
 
 	hotspotDetector *hotspot.Detector
 
+	snapshotWriter *persistence.SnapshotWriter
+	writeBehind    *persistence.WriteBehind
+
 	writeStateMu  sync.RWMutex
 	lastWriteSlot uint16
 	lastWriteLSN  uint64
@@ -72,12 +76,38 @@ func (h *Handler) SetHotspotDetector(d *hotspot.Detector) {
 	h.hotspotDetector = d
 }
 
+// SetSnapshotWriter sets the snapshot writer for BGSAVE/SAVE/LASTSAVE commands.
+func (h *Handler) SetSnapshotWriter(sw *persistence.SnapshotWriter) {
+	h.snapshotWriter = sw
+}
+
+// SetWriteBehind sets the write-behind persistence for INFO stats.
+func (h *Handler) SetWriteBehind(wb *persistence.WriteBehind) {
+	h.writeBehind = wb
+}
+
 // StartReplicaClient establishes a persistent TCP connection to the master
 // for receiving replication ops (Redis-style replication).
-func (h *Handler) StartReplicaClient(masterAddr string, replicaID string) {
-	client := replication.NewReplicaClient(masterAddr, replicaID, func(op replication.Op) error {
+func (h *Handler) StartReplicaClient(masterAddr, replicaID, masterID string) {
+	client := replication.NewReplicaClient(masterAddr, replicaID, masterID, func(op replication.Op) error {
 		return h.applyIncomingReplicationOp(context.Background(), op)
 	})
+
+	// Wire up Redis-style failover: when master connection is lost and gossip
+	// confirms the master is FAIL, the replica self-promotes.
+	if h.clusterHandler != nil {
+		c := h.clusterHandler.GetCluster()
+		client.SetMasterFailureCheck(func() bool {
+			node := c.GetNode(masterID)
+			return node == nil || node.State == cluster.NodeStateFail
+		})
+		client.SetFailoverCallback(func() {
+			if err := c.FailoverToMaster(masterID); err != nil {
+				log.Printf("Failover failed: %v", err)
+			}
+		})
+	}
+
 	client.Start()
 	log.Printf("Replica client started, connecting to master at %s", masterAddr)
 }
@@ -87,8 +117,8 @@ func (h *Handler) SetCluster(c *cluster.Cluster) {
 	h.router = router.NewClusterRouter(c)
 	h.clusterEnabled = true
 	// Wire up the replica→master persistent connection callback (Redis-style replication)
-	c.SetOnReplicate(func(masterAddr, replicaID string) {
-		h.StartReplicaClient(masterAddr, replicaID)
+	c.SetOnReplicate(func(masterAddr, replicaID, masterID string) {
+		h.StartReplicaClient(masterAddr, replicaID, masterID)
 	})
 }
 
@@ -168,6 +198,10 @@ func (h *Handler) registerCommands() {
 	h.commands["REPLAPPLY"] = h.cmdReplApply
 	h.commands["REGREPLICA"] = h.cmdRegReplica
 	h.commands["WAIT"] = h.cmdWait
+
+	h.commands["BGSAVE"] = h.cmdBGSAVE
+	h.commands["SAVE"] = h.cmdSave
+	h.commands["LASTSAVE"] = h.cmdLastSave
 }
 
 func (h *Handler) ExecuteBytes(ctx context.Context, conn redcon.Conn, cmdBytes []byte, args [][]byte) {
@@ -571,6 +605,25 @@ func (h *Handler) cmdInfo(ctx context.Context, conn redcon.Conn, _ [][]byte) {
 	buf.WriteString("db0:keys=")
 	buf.WriteString(strconv.FormatInt(size, 10))
 	buf.WriteString(",expires=0\r\n")
+
+	if h.snapshotWriter != nil || h.writeBehind != nil {
+		buf.WriteString("\r\n# Persistence\r\n")
+		buf.WriteString("loading:0\r\n")
+		if h.snapshotWriter != nil {
+			buf.WriteString("rdb_last_save_time:")
+			buf.WriteString(strconv.FormatInt(h.snapshotWriter.LastSaveUnix(), 10))
+			buf.WriteString("\r\n")
+		}
+		if h.writeBehind != nil {
+			flushed, dropped := h.writeBehind.Stats()
+			buf.WriteString("writebehind_flushed:")
+			buf.WriteString(strconv.FormatInt(flushed, 10))
+			buf.WriteString("\r\n")
+			buf.WriteString("writebehind_dropped:")
+			buf.WriteString(strconv.FormatInt(dropped, 10))
+			buf.WriteString("\r\n")
+		}
+	}
 
 	if h.clusterEnabled {
 		buf.WriteString("\r\n# Cluster\r\n")
@@ -1660,6 +1713,84 @@ func (h *Handler) cmdClient(_ context.Context, conn redcon.Conn, args [][]byte) 
 	}
 }
 
+func (h *Handler) cmdBGSAVE(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 0 {
+		conn.WriteError("ERR wrong number of arguments for 'bgsave' command")
+		return
+	}
+	if h.snapshotWriter == nil {
+		conn.WriteError("ERR persistence not configured")
+		return
+	}
+	h.snapshotWriter.SaveAsync(func() (map[string][]byte, error) {
+		keys, err := h.engine.Keys(context.Background(), "*")
+		if err != nil {
+			return nil, err
+		}
+		result := make(map[string][]byte, len(keys))
+		for _, key := range keys {
+			entry, err := h.engine.GetEntry(context.Background(), key)
+			if err != nil {
+				continue
+			}
+			serialized, serr := memory.SerializeEntryValue(entry)
+			if serr != nil {
+				continue
+			}
+			result[key] = serialized
+		}
+		return result, nil
+	})
+	conn.WriteString("Background saving started")
+}
+
+func (h *Handler) cmdSave(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 0 {
+		conn.WriteError("ERR wrong number of arguments for 'save' command")
+		return
+	}
+	if h.snapshotWriter == nil {
+		conn.WriteError("ERR persistence not configured")
+		return
+	}
+	err := h.snapshotWriter.Save(func() (map[string][]byte, error) {
+		keys, err := h.engine.Keys(context.Background(), "*")
+		if err != nil {
+			return nil, err
+		}
+		result := make(map[string][]byte, len(keys))
+		for _, key := range keys {
+			entry, err := h.engine.GetEntry(context.Background(), key)
+			if err != nil {
+				continue
+			}
+			serialized, serr := memory.SerializeEntryValue(entry)
+			if serr != nil {
+				continue
+			}
+			result[key] = serialized
+		}
+		return result, nil
+	})
+	if err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
+	conn.WriteString("OK")
+}
+
+func (h *Handler) cmdLastSave(_ context.Context, conn redcon.Conn, args [][]byte) {
+	if len(args) != 0 {
+		conn.WriteError("ERR wrong number of arguments for 'lastsave' command")
+		return
+	}
+	if h.snapshotWriter == nil {
+		conn.WriteInt(0)
+		return
+	}
+	conn.WriteInt64(h.snapshotWriter.LastSaveUnix())
+}
+
 func (h *Handler) cmdAsking(_ context.Context, conn redcon.Conn, _ [][]byte) {
 	state := getConnState(conn)
 	state.AskingFlag = true
@@ -1915,41 +2046,14 @@ func (h *Handler) cmdMigrate(ctx context.Context, conn redcon.Conn, args [][]byt
 }
 
 // cmdRegReplica handles REGREPLICA <replica-id>.
-// The replica establishes a persistent TCP connection to the master and sends this
-// command to register itself. The master detaches the connection from the RESP
-// event loop and uses it exclusively for pushing REPLAPPLY ops (Redis-style replication).
+// Simple acknowledgment; the actual persistent connection is established via the
+// dedicated replication listener port (RESP port + 20000).
 func (h *Handler) cmdRegReplica(_ context.Context, conn redcon.Conn, args [][]byte) {
 	if len(args) != 1 {
 		conn.WriteError("ERR wrong number of arguments for 'regreplica' command")
 		return
 	}
-	replicaID := bytes.BytesToString(args[0])
-
-	if h.clusterHandler == nil || h.clusterHandler.GetCluster() == nil {
-		conn.WriteError("ERR cluster is required")
-		return
-	}
-
-	mgr := h.clusterHandler.GetCluster().GetReplicationManager()
-	if mgr == nil {
-		conn.WriteError("ERR replication manager not configured")
-		return
-	}
-
-	// Send OK before detaching
 	conn.WriteString("OK")
-
-	// Detach the connection from redcon's event loop
-	dconn := conn.Detach()
-	if err := dconn.Flush(); err != nil {
-		log.Printf("REGREPLICA flush failed for %s: %v", replicaID, err)
-		dconn.Close()
-		return
-	}
-
-	// Register the raw TCP connection for persistent push
-	mgr.ConnRegistry().Register(replicaID, dconn.NetConn(), dconn)
-	log.Printf("Replica %s registered via persistent connection", replicaID)
 }
 
 func (h *Handler) cmdReplApply(_ context.Context, conn redcon.Conn, args [][]byte) {

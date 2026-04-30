@@ -25,6 +25,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,6 +80,7 @@ type clusterNode struct {
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconciliation loop
 func (r *AutoCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -145,6 +147,12 @@ func (r *AutoCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Reconcile StatefulSet
 	if err := r.reconcileStatefulSet(ctx, ac); err != nil {
 		logger.Error(err, "Failed to reconcile StatefulSet")
+		return ctrl.Result{RequeueAfter: requeueAfterError}, err
+	}
+
+	// Reconcile HPA
+	if err := r.reconcileHPA(ctx, ac); err != nil {
+		logger.Error(err, "Failed to reconcile HPA")
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
@@ -592,5 +600,6 @@ func (r *AutoCacheReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Complete(r)
 }

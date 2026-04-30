@@ -88,6 +88,12 @@ func (n *GossipNode) MarkFail() {
 	n.mu.Unlock()
 }
 
+func (n *GossipNode) AddFailReport(reporterID string) {
+	n.mu.Lock()
+	n.FailReports[reporterID] = time.Now().UnixMilli()
+	n.mu.Unlock()
+}
+
 func (n *GossipNode) CountFailReports(validDuration time.Duration) int {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -293,6 +299,7 @@ func (g *Gossip) handlePing(conn net.Conn, msg *Message) {
 	}
 
 	for _, info := range msg.GossipNodes {
+		info.ReporterID = msg.Sender // record who told us about this node
 		g.processNodeInfo(info, false) // second-hand gossip
 	}
 
@@ -317,6 +324,7 @@ func (g *Gossip) handlePong(msg *Message) {
 	}
 
 	for _, info := range msg.GossipNodes {
+		info.ReporterID = msg.Sender // record who told us about this node
 		g.processNodeInfo(info, false) // second-hand gossip
 	}
 }
@@ -337,7 +345,6 @@ func (g *Gossip) handleFail(msg *Message) {
 
 func (g *Gossip) processNodeInfo(info *NodeInfo, direct bool) {
 	g.nodesMu.Lock()
-	defer g.nodesMu.Unlock()
 
 	node, exists := g.nodes[info.ID]
 	if !exists {
@@ -369,21 +376,45 @@ func (g *Gossip) processNodeInfo(info *NodeInfo, direct bool) {
 			node.MasterID = info.MasterID
 		}
 	}
+	// Collect PFAIL report info before unlocking.
+	addFailReport := info.Flags&NodeFlagPFail != 0 && info.ReporterID != ""
+	failReporter := info.ReporterID
 	isMaster := node.Role == NodeRoleMaster
 	node.Load.TotalQPS = info.Load.TotalQPS
 	node.Load.HotSlotCount = info.Load.HotSlotCount
 	node.mu.Unlock()
 
-	// If a node reports itself as a replica of this node, register it locally
-	// so the master knows to push replication ops to it.
-	if direct && info.MasterID != "" && info.MasterID == g.self.ID {
+	// Add fail report outside node.mu (AddFailReport acquires its own lock).
+	if addFailReport {
+		node.AddFailReport(failReporter)
+	}
+
+	// Collect deferred work to do outside g.nodesMu.
+	registerReplica := direct && info.MasterID != "" && info.MasterID == g.self.ID
+	registerReplicaOther := direct && info.MasterID != "" && info.MasterID != g.self.ID
+	replicaMasterID := info.MasterID
+	processSlots := len(info.Slots) > 0 && isMaster
+
+	g.nodesMu.Unlock()
+
+	// Register replica for all our slots (heavy operation, outside lock).
+	if registerReplica {
 		mySlots := g.slots.GetNodeSlots(g.self.ID)
 		for _, slot := range mySlots {
 			g.slots.AddSlotReplica(slot, info.ID)
 		}
 	}
 
-	if len(info.Slots) > 0 && isMaster {
+	// Also propagate: when any node sees a replica via gossip, register it
+	// for that master's slots locally, so every node knows the replica topology.
+	if registerReplicaOther {
+		masterSlots := g.slots.GetNodeSlots(replicaMasterID)
+		for _, slot := range masterSlots {
+			g.slots.AddSlotReplica(slot, info.ID)
+		}
+	}
+
+	if processSlots {
 		slots := BytesToSlots(info.Slots)
 		for _, slot := range slots {
 			if !g.canApplySlotOwnership(slot, info.ConfigEpoch) {
@@ -826,7 +857,7 @@ func (g *Gossip) canApplySlotOwnership(slot uint16, incomingEpoch uint64) bool {
 	if incomingEpoch == 0 {
 		return seenEpoch == 0
 	}
-	return incomingEpoch >= seenEpoch
+	return incomingEpoch > seenEpoch
 }
 
 func (g *Gossip) recordSlotEpoch(slot uint16, epoch uint64) {
@@ -853,6 +884,20 @@ func (g *Gossip) SetSelfRole(role NodeRole, masterID string) {
 	g.self.Role = role
 	g.self.MasterID = masterID
 	g.self.mu.Unlock()
+}
+
+// PromoteToMaster updates a replica node's role to master in the local gossip view.
+// Used during auto-failover when a replica is promoted to primary.
+func (g *Gossip) PromoteToMaster(nodeID string) {
+	g.nodesMu.Lock()
+	if node, ok := g.nodes[nodeID]; ok {
+		node.mu.Lock()
+		node.Role = NodeRoleMaster
+		node.MasterID = ""
+		node.mu.Unlock()
+		log.Printf("Promoted replica %s to master in gossip", shortID(nodeID))
+	}
+	g.nodesMu.Unlock()
 }
 
 func (g *Gossip) writeMessage(conn net.Conn, data []byte) error {

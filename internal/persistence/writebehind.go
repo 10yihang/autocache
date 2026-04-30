@@ -132,13 +132,13 @@ func (wb *WriteBehind) flushLoop() {
 		case op := <-wb.ch:
 			batch = append(batch, op)
 			if len(batch) >= wb.cfg.BatchSize {
-				wb.flush(batch)
+				wb.flushWithRetry(batch)
 				batch = batch[:0]
 				timer.Reset(wb.cfg.FlushInterval)
 			}
 		case <-timer.C:
 			if len(batch) > 0 {
-				wb.flush(batch)
+				wb.flushWithRetry(batch)
 				batch = batch[:0]
 			}
 			timer.Reset(wb.cfg.FlushInterval)
@@ -146,7 +146,7 @@ func (wb *WriteBehind) flushLoop() {
 	}
 }
 
-func (wb *WriteBehind) flush(batch []writeOp) {
+func (wb *WriteBehind) flush(batch []writeOp) error {
 	wbFlush := wb.db.NewWriteBatch()
 	defer wbFlush.Cancel()
 
@@ -175,10 +175,24 @@ func (wb *WriteBehind) flush(batch []writeOp) {
 	}
 
 	if err := wbFlush.Flush(); err != nil {
-		log.Printf("[writebehind] Flush error: %v", err)
-		return
+		return err
 	}
 	wb.flushed.Add(int64(len(batch)))
+	return nil
+}
+
+// flushWithRetry flushes a batch with up to 3 attempts and exponential backoff.
+func (wb *WriteBehind) flushWithRetry(batch []writeOp) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := wb.flush(batch); err == nil {
+			return
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
+		}
+	}
+	log.Printf("[writebehind] flush failed after 3 attempts: %v", lastErr)
 }
 
 func (wb *WriteBehind) drain() {
@@ -252,3 +266,9 @@ func (wb *WriteBehind) LoadIntoMemory(ctx context.Context) (int64, error) {
 func (wb *WriteBehind) Stats() (flushed, dropped int64) {
 	return wb.flushed.Load(), wb.dropped.Load()
 }
+
+// DroppedCount returns the number of dropped operations.
+func (wb *WriteBehind) DroppedCount() int64 { return wb.dropped.Load() }
+
+// FlushedCount returns the number of flushed operations.
+func (wb *WriteBehind) FlushedCount() int64 { return wb.flushed.Load() }

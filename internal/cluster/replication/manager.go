@@ -22,7 +22,8 @@ type Manager struct {
 	allocate SlotLSNAllocator
 	stream   *Stream
 	acks     *AckTracker
-	registry *MasterConnRegistry // persistent replica connections (Redis-style)
+	registry *MasterConnRegistry // persistent replica connections
+	listener *ReplListener       // dedicated TCP listener for replicas
 
 	mu               sync.RWMutex
 	resolve          func(slot uint16) []PeerTarget
@@ -52,6 +53,22 @@ func (m *Manager) ConnRegistry() *MasterConnRegistry {
 		return nil
 	}
 	return m.registry
+}
+
+// StartListener starts the dedicated TCP listener for replica connections.
+func (m *Manager) StartListener(addr string) error {
+	if m == nil || m.registry == nil {
+		return fmt.Errorf("replication manager not initialized")
+	}
+	m.listener = NewReplListener(addr, m.registry)
+	return m.listener.Start()
+}
+
+// StopListener stops the replication listener.
+func (m *Manager) StopListener() {
+	if m.listener != nil {
+		m.listener.Stop()
+	}
 }
 
 func (m *Manager) initCallbacks() {
@@ -131,10 +148,10 @@ func (m *Manager) SetStreamSender(send peerSender) {
 }
 
 func (m *Manager) Close() {
-	if m == nil || m.stream == nil {
-		return
+	m.StopListener()
+	if m.stream != nil {
+		m.stream.Close()
 	}
-	m.stream.Close()
 }
 
 func (m *Manager) ReceiveTransportOp(op Op) {
@@ -163,18 +180,15 @@ func (m *Manager) InboundAfter(slot uint16, lsn uint64) []Op {
 }
 
 func (m *Manager) dispatch(op Op) {
-	// Push through persistent replica connections first (Redis-style)
-	sent := m.registry.Broadcast(op)
+	// Push through persistent replica connections first (Redis-style long connection).
+	m.registry.Broadcast(op)
 
-	// Fallback: resolve via slot replicas for peers not yet connected
+	// Also push via slot-resolved stream for replicas not yet connected.
 	m.mu.RLock()
 	resolve := m.resolve
 	m.mu.RUnlock()
 	if resolve != nil && m.stream != nil {
 		for _, target := range resolve(op.Slot) {
-			if sent > 0 {
-				_ = sent
-			}
 			m.stream.Enqueue(target, op)
 		}
 	}

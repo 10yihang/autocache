@@ -109,6 +109,11 @@ func (cm *cmdMap) registerAll() {
 	cm.register([]byte("REPLAPPLY"), cm.h.cmdReplApply)
 	cm.register([]byte("REGREPLICA"), cm.h.cmdRegReplica)
 	cm.register([]byte("WAIT"), cm.h.cmdWait)
+
+	// Persistence commands
+	cm.register([]byte("BGSAVE"), cm.h.cmdBGSAVE)
+	cm.register([]byte("SAVE"), cm.h.cmdSave)
+	cm.register([]byte("LASTSAVE"), cm.h.cmdLastSave)
 }
 
 func (cm *cmdMap) register(name []byte, handler CommandHandler) {

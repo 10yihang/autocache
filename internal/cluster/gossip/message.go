@@ -74,6 +74,10 @@ type NodeInfo struct {
 
 	// Load information (populated when hotspot detector is available).
 	Load NodeLoadInfo
+
+	// ReporterID is the ID of the node that carried this gossip (set by handlePing/handlePong).
+	// Used for fail report consensus: when a node reports another as PFAIL.
+	ReporterID string
 }
 
 const (

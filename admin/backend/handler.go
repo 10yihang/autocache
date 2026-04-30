@@ -3,6 +3,7 @@ package admin
 import (
 	"io/fs"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync/atomic"
 
@@ -54,6 +55,11 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux.Handle("/api/v1/metrics/stream", chain(http.HandlerFunc(h.handleMetricsStream)))
 
 	mux.Handle("/assets/", chain(http.StripPrefix("/", http.FileServer(http.FS(h.staticFS)))))
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 	mux.Handle("/", chain(http.HandlerFunc(h.handleSPA)))
 
 	return mux

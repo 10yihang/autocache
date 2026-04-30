@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,10 @@ type AutoCacheSpec struct {
 	// +kubebuilder:validation:Maximum=1000
 	// +kubebuilder:default=3
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// HPA defines the horizontal pod autoscaling configuration.
+	// +optional
+	HPA *AutoscalingSpec `json:"hpa,omitempty"`
 
 	// Image is the container image for AutoCache
 	// +kubebuilder:default="autocache:latest"
@@ -161,6 +166,40 @@ type AuthSpec struct {
 	PasswordKey string `json:"passwordKey,omitempty"`
 }
 
+// AutoscalingSpec defines HPA (Horizontal Pod Autoscaler) configuration.
+type AutoscalingSpec struct {
+	// Enabled indicates whether HPA is enabled for this cluster.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MinReplicas is the minimum number of replicas.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	MinReplicas int32 `json:"minReplicas,omitempty"`
+
+	// MaxReplicas is the maximum number of replicas.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
+	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+
+	// TargetCPUUtilizationPercentage is the target CPU utilization percentage.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+
+	// TargetMemoryUtilizationPercentage is the target memory utilization percentage.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	TargetMemoryUtilizationPercentage *int32 `json:"targetMemoryUtilizationPercentage,omitempty"`
+
+	// Behavior defines the scaling behavior.
+	// +optional
+	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
+}
+
 // TieredStorageSpec defines tiered storage configuration
 type TieredStorageSpec struct {
 	// Enabled indicates whether tiered storage is enabled
@@ -266,6 +305,14 @@ type AutoCacheStatus struct {
 	// Migration contains the current migration status
 	// +optional
 	Migration *MigrationStatus `json:"migration,omitempty"`
+
+	// HPAActive indicates whether HPA is configured and active.
+	// +optional
+	HPAActive bool `json:"hpaActive,omitempty"`
+
+	// HPAReason provides the reason for the current HPA state.
+	// +optional
+	HPAReason string `json:"hpaReason,omitempty"`
 }
 
 // MigrationPhase represents the phase of slot migration

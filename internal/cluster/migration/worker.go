@@ -165,7 +165,8 @@ func (w *Worker) getKeysForSlot(ctx context.Context, slot uint16) ([]string, err
 func (w *Worker) migrateKey(ctx context.Context, key, targetAddr string) error {
 	entry, err := w.engine.GetEntry(ctx, key)
 	if err != nil {
-		return nil
+		log.Printf("migration: failed to get entry for key %q, skipping: %v", key, err)
+		return fmt.Errorf("failed to get entry for key %s: %w", key, err)
 	}
 
 	var ttlMs int64

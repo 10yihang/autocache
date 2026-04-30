@@ -3,6 +3,7 @@ package tiered
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/10yihang/autocache/internal/engine"
@@ -10,14 +11,54 @@ import (
 	pkgerrors "github.com/10yihang/autocache/pkg/errors"
 )
 
+type tokenBucket struct {
+	tokens   float64
+	rate     float64 // tokens per second
+	lastTime time.Time
+	mu       sync.Mutex
+}
+
+func newTokenBucket(rateBytesPerSec int64) *tokenBucket {
+	return &tokenBucket{
+		tokens:   float64(rateBytesPerSec),
+		rate:     float64(rateBytesPerSec),
+		lastTime: time.Now(),
+	}
+}
+
+func (tb *tokenBucket) wait(n int) {
+	tb.mu.Lock()
+	now := time.Now()
+	elapsed := now.Sub(tb.lastTime).Seconds()
+	tb.tokens += elapsed * tb.rate
+	if tb.tokens > tb.rate {
+		tb.tokens = tb.rate
+	}
+	tb.tokens -= float64(n)
+	tb.lastTime = now
+
+	if tb.tokens < 0 {
+		waitTime := time.Duration((-tb.tokens / tb.rate) * float64(time.Second))
+		tb.mu.Unlock()
+		time.Sleep(waitTime)
+	} else {
+		tb.mu.Unlock()
+	}
+}
+
 // Migrator handles data migration between tiers
 type Migrator struct {
-	manager *Manager
+	manager     *Manager
+	rateLimiter *tokenBucket
 }
 
 // NewMigrator creates a new migrator
 func NewMigrator(manager *Manager) *Migrator {
-	return &Migrator{manager: manager}
+	m := &Migrator{manager: manager}
+	if manager.config.MigrationRateLimit > 0 {
+		m.rateLimiter = newTokenBucket(manager.config.MigrationRateLimit)
+	}
+	return m
 }
 
 // MigrationLoop runs the migration loop
@@ -144,6 +185,25 @@ func (m *Migrator) demoteKey(ctx context.Context, key string, from, to TierType)
 
 	if ttl < 0 {
 		ttl = 0
+	}
+
+	// Skip expired entries
+	if entry != nil && !entry.ExpireAt.IsZero() && time.Until(entry.ExpireAt) <= 0 {
+		return nil
+	}
+
+	// Rate limiting
+	if m.rateLimiter != nil {
+		var entrySize int
+		if entry != nil {
+			switch v := entry.Value.(type) {
+			case string:
+				entrySize = len(v)
+			case []byte:
+				entrySize = len(v)
+			}
+		}
+		m.rateLimiter.wait(entrySize)
 	}
 
 	// Write to dest

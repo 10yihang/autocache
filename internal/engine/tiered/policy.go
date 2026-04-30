@@ -139,6 +139,19 @@ type WTinyLFUCostAwarePolicy struct {
 	warmGhost  map[string]uint8
 }
 
+func DefaultWTinyLFUCostAwareConfig() WTinyLFUCostAwareConfig {
+	return WTinyLFUCostAwareConfig{
+		HotCapacity:               1024,
+		WindowPercentage:          1,
+		ProtectedPercentage:       80,
+		WarmToColdDemoteThreshold: -0.5,
+		CostAccessWeight:          1.0,
+		CostRecencyWeight:         0.4,
+		CostSizePenaltyWeight:     0.2,
+		CostWritePenaltyWeight:    0.2,
+	}
+}
+
 func NewWTinyLFUCostAwarePolicy(cfg WTinyLFUCostAwareConfig) *WTinyLFUCostAwarePolicy {
 	if cfg.HotCapacity <= 0 {
 		cfg.HotCapacity = 1024

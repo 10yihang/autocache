@@ -61,8 +61,10 @@ type Cluster struct {
 	engine         DrainEngine
 	drainTimeout   time.Duration
 	rebalanceMgr   *rebalance.Manager
+	failoverMu     sync.Mutex
 
-	onReplicate func(masterAddr, replicaID string) // callback to start ReplicaClient
+	onReplicate        func(masterAddr, replicaID, masterID string) // callback to start ReplicaClient
+	processedFailovers map[string]bool                     // track which failed masters have been auto-failover'd
 }
 
 type Config struct {
@@ -91,10 +93,11 @@ func NewCluster(cfg *Config, stateManager *state.StateManager) (*Cluster, error)
 	slots := NewSlotManager()
 
 	c := &Cluster{
-		self:         self,
-		slots:        slots,
-		state:        ClusterStateDown,
-		stateManager: stateManager,
+		self:                self,
+		slots:               slots,
+		state:               ClusterStateDown,
+		stateManager:        stateManager,
+		processedFailovers:  make(map[string]bool),
 	}
 	c.replication = replication.NewManager(replication.NewLogStore(1024), slots.AllocateLSN)
 	c.replication.SetReplicaResolver(c.replicationTargetsForSlot)
@@ -125,6 +128,14 @@ func NewCluster(cfg *Config, stateManager *state.StateManager) (*Cluster, error)
 func (c *Cluster) Start(seeds []string) error {
 	if err := c.gossip.Start(); err != nil {
 		return err
+	}
+
+	// Start the dedicated replication listener for persistent replica connections.
+	replAddr := fmt.Sprintf("%s:%d", c.self.IP, c.self.Port+20000)
+	if err := c.replication.StartListener(replAddr); err != nil {
+		log.Printf("Warning: failed to start replication listener on %s: %v", replAddr, err)
+	} else {
+		log.Printf("Replication listener started on %s", replAddr)
 	}
 
 	for _, seed := range seeds {
@@ -321,8 +332,15 @@ func (c *Cluster) drainSlot(ctx context.Context, slot uint16, targetAddr string,
 		}
 	}
 
+	// Re-check for concurrent writes during migration
+	remaining := c.engine.KeysInSlot(slot, 0)
+	if len(remaining) > 0 {
+		return fmt.Errorf("concurrent writes detected during slot drain: slot=%d, remaining=%d keys", slot, len(remaining))
+	}
+
 	return nil
 }
+
 
 func (c *Cluster) drainKey(ctx context.Context, key string, targetAddr string, timeout time.Duration) error {
 	entry, err := c.engine.GetEntry(ctx, key)
@@ -575,20 +593,65 @@ func (c *Cluster) ReplicateTo(masterNodeID string) error {
 	}
 	log.Printf("Configured replication: %d slots of master %s now replicated to self (%s)", count, masterNodeID, selfID)
 
-	// Start persistent replica→master connection (Redis-style replication).
+	// Start persistent replica→master connection via dedicated replication port.
 	if c.onReplicate != nil {
-		c.onReplicate(node.Addr(), selfID)
+		replAddr := fmt.Sprintf("%s:%d", node.IP, node.Port+20000)
+		c.onReplicate(replAddr, selfID, masterNodeID)
 	}
 	return nil
 }
 
 // SetOnReplicate sets a callback that is invoked after a successful CLUSTER REPLICATE
 // to start the persistent replica→master connection.
-func (c *Cluster) SetOnReplicate(fn func(masterAddr, replicaID string)) {
+func (c *Cluster) SetOnReplicate(fn func(masterAddr, replicaID, masterID string)) {
 	c.onReplicate = fn
 }
 
-// MasterAddr returns the address of the master this node replicates, if any.
+// FailoverToMaster promotes this replica to master, taking over all slots
+// from its failed master (Redis-style self-promotion).
+func (c *Cluster) FailoverToMaster(masterID string) error {
+	log.Printf("FAILOVER: replica %s self-promoting to master, taking over from %s",
+		shortID(c.self.ID), shortID(masterID))
+
+	// Update self role to master.
+	c.self.Role = NodeRoleMaster
+	c.self.MasterID = ""
+	c.gossip.SetSelfRole(gossip.NodeRoleMaster, "")
+	c.gossip.PromoteToMaster(c.self.ID)
+
+	// Take ownership of all slots previously owned by the old master.
+	masterSlots := c.slots.GetNodeSlots(masterID)
+	log.Printf("FAILOVER: taking over %d slots from failed master %s", len(masterSlots), shortID(masterID))
+
+	c.IncrementEpoch()
+	epoch := c.GetCurrentEpoch()
+
+	promoted := 0
+	for _, slot := range masterSlots {
+		info := c.slots.GetSlotInfo(slot)
+		if info == nil || info.NodeID != masterID {
+			continue
+		}
+		_ = c.slots.AssignSlot(slot, c.self.ID)
+		c.slots.SetSlotConfigEpoch(slot, epoch)
+		c.gossip.BroadcastSlotOwnership(slot, c.self.ID)
+		promoted++
+	}
+
+	log.Printf("FAILOVER: completed — took %d/%d slots", promoted, len(masterSlots))
+	return nil
+}
+
+// GetNode returns the cluster Node for the given ID, or nil.
+func (c *Cluster) GetNode(nodeID string) *Node {
+	gn := c.gossip.GetNode(nodeID)
+	if gn == nil {
+		return nil
+	}
+	return gossipNodeToNode(gn)
+}
+
+// GetMasterAddr returns the address of the master this node replicates, if any.
 func (c *Cluster) GetMasterAddr() string {
 	masterID := c.self.MasterID
 	if masterID == "" {
@@ -690,10 +753,16 @@ func (c *Cluster) BroadcastSlotOwnershipChange(slot uint16, newPrimary string) e
 
 func (c *Cluster) onNodeJoin(node *gossip.GossipNode) {
 	log.Printf("Node joined: %s (%s)", shortID(node.ID), node.Addr())
+	// Clear failover state so the node can be auto-failover'd again if it fails later.
+	c.failoverMu.Lock()
+	delete(c.processedFailovers, node.ID)
+	c.failoverMu.Unlock()
 }
 
 func (c *Cluster) onNodeLeave(node *gossip.GossipNode) {
 	log.Printf("Node left: %s (%s)", shortID(node.ID), node.Addr())
+	// Actual failover is handled Redis-style: each replica monitors its own
+	// master and self-promotes when the master is confirmed FAIL.
 }
 
 func (c *Cluster) onSlotChange(slot uint16, nodeID string) {

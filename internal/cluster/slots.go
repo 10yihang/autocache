@@ -91,6 +91,15 @@ func (sm *SlotManager) AssignSlotRange(start, end uint16, nodeID string) error {
 	return nil
 }
 
+func (sm *SlotManager) SetSlotConfigEpoch(slot uint16, epoch uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if int(slot) < len(sm.slots) {
+		sm.slots[slot].ConfigEpoch = epoch
+	}
+	sm.markDirty()
+}
+
 func (sm *SlotManager) GetSlotNode(slot uint16) string {
 	if slot >= hash.SlotCount {
 		return ""

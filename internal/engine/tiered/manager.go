@@ -42,6 +42,7 @@ type Config struct {
 	MigrationRateLimit int64
 
 	// Policy config
+	PolicyConfig       *WTinyLFUCostAwareConfig
 	HotAccessThreshold uint64
 	HotIdleThreshold   time.Duration
 	ColdIdleThreshold  time.Duration
@@ -95,30 +96,31 @@ type Manager struct {
 	wg     sync.WaitGroup
 
 	mu sync.RWMutex
+
+	// Semaphore to limit concurrent promotions
+	promoteSem chan struct{}
 }
 
 // NewManager creates a tiered manager
 func NewManager(cfg *Config, hotTier *memory.Store) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	policyCfg := cfg.PolicyConfig
+	if policyCfg == nil {
+		defaultCfg := DefaultWTinyLFUCostAwareConfig()
+		policyCfg = &defaultCfg
+	}
+	policyCfg.HotIdleThreshold = cfg.HotIdleThreshold
+	policyCfg.WarmPromotionMinFrequency = cfg.HotAccessThreshold
+
 	m := &Manager{
-		config:  cfg,
-		hotTier: hotTier,
-		stats:   NewStatsCollector(1.0),
-		policy: NewWTinyLFUCostAwarePolicy(WTinyLFUCostAwareConfig{
-			HotCapacity:               1024,
-			HotIdleThreshold:          cfg.HotIdleThreshold,
-			WindowPercentage:          1,
-			ProtectedPercentage:       80,
-			WarmPromotionMinFrequency: cfg.HotAccessThreshold,
-			WarmToColdDemoteThreshold: -0.5,
-			CostAccessWeight:          1.0,
-			CostRecencyWeight:         0.4,
-			CostSizePenaltyWeight:     0.2,
-			CostWritePenaltyWeight:    0.2,
-		}),
-		ctx:    ctx,
-		cancel: cancel,
+		config:     cfg,
+		hotTier:    hotTier,
+		stats:      NewStatsCollector(1.0),
+		policy:     NewWTinyLFUCostAwarePolicy(*policyCfg),
+		ctx:        ctx,
+		cancel:     cancel,
+		promoteSem: make(chan struct{}, 16),
 	}
 
 	if cfg.WarmTierEnabled {
@@ -597,18 +599,28 @@ func (m *Manager) MGetBytes(ctx context.Context, keys ...string) ([][]byte, erro
 func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *engine.Entry) {
 	stats := m.stats.GetStats(key)
 	if m.policy.ShouldPromote(key, stats, TierWarm) {
-		ttl := entryTTL(entry)
+		select {
+		case m.promoteSem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		default:
+			return
+		}
 		go func() {
+			defer func() { <-m.promoteSem }()
 			start := time.Now()
 			metrics2.AddTieredMigrationInFlight(1)
 			defer metrics2.AddTieredMigrationInFlight(-1)
-			if err := m.hotTier.Set(ctx, key, value, ttl); err != nil {
+			promoCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+			defer cancel()
+			ttl := entryTTL(entry)
+			if err := m.hotTier.Set(promoCtx, key, value, ttl); err != nil {
 				metrics2.RecordTieredMigrationError("up", "storage_error")
 				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
 				return
 			}
 			if m.warmTier != nil {
-				if _, err := m.warmTier.Del(ctx, key); err != nil {
+				if _, err := m.warmTier.Del(promoCtx, key); err != nil {
 					metrics2.RecordTieredMigrationError("up", classifyMigrationError(err))
 					metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
 					return
@@ -626,20 +638,30 @@ func (m *Manager) maybePromote(ctx context.Context, key, value string, entry *en
 }
 
 func (m *Manager) promoteFromCold(ctx context.Context, key, value string, entry *engine.Entry) {
-	ttl := entryTTL(entry)
+	select {
+	case m.promoteSem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	default:
+		return
+	}
 	go func() {
+		defer func() { <-m.promoteSem }()
 		start := time.Now()
 		metrics2.AddTieredMigrationInFlight(1)
 		defer metrics2.AddTieredMigrationInFlight(-1)
+		promoCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+		defer cancel()
+		ttl := entryTTL(entry)
 		if m.warmTier != nil {
-			if err := m.warmTier.Set(ctx, key, value, ttl); err != nil {
+			if err := m.warmTier.Set(promoCtx, key, value, ttl); err != nil {
 				metrics2.RecordTieredMigrationError("up", "storage_error")
 				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
 				return
 			}
 		}
 		if m.coldTier != nil {
-			if _, err := m.coldTier.Del(ctx, key); err != nil {
+			if _, err := m.coldTier.Del(promoCtx, key); err != nil {
 				metrics2.RecordTieredMigrationError("up", classifyMigrationError(err))
 				metrics2.ObserveTieredMigrationDuration("up", time.Since(start), false)
 				return
@@ -651,7 +673,6 @@ func (m *Manager) promoteFromCold(ctx context.Context, key, value string, entry 
 		metrics2.RecordTieredMigration("up")
 		m.updateTierMetrics()
 		metrics2.ObserveTieredMigrationDuration("up", time.Since(start), true)
-		// log.Printf("Promoted key %s from cold to warm tier", key)
 	}()
 }
 

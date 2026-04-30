@@ -11,6 +11,7 @@ import (
 	"github.com/10yihang/autocache/internal/cluster"
 	"github.com/10yihang/autocache/internal/cluster/hotspot"
 	metrics2 "github.com/10yihang/autocache/internal/metrics"
+	"github.com/10yihang/autocache/internal/persistence"
 )
 
 type Server struct {
@@ -48,6 +49,14 @@ func (s *Server) SetCluster(c *cluster.Cluster) {
 
 func (s *Server) SetHotspotDetector(d *hotspot.Detector) {
 	s.handler.SetHotspotDetector(d)
+}
+
+func (s *Server) SetSnapshotWriter(sw *persistence.SnapshotWriter) {
+	s.handler.SetSnapshotWriter(sw)
+}
+
+func (s *Server) SetWriteBehind(wb *persistence.WriteBehind) {
+	s.handler.SetWriteBehind(wb)
 }
 
 func (s *Server) SetQuietConnections(quiet bool) {

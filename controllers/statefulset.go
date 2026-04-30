@@ -183,7 +183,7 @@ func (r *AutoCacheReconciler) buildStatefulSet(ac *cachev1alpha1.AutoCache) *app
 					Affinity:                  r.buildAffinity(ac),
 					Tolerations:               ac.Spec.Tolerations,
 					NodeSelector:              ac.Spec.NodeSelector,
-					TopologySpreadConstraints: ac.Spec.TopologySpreadConstraints,
+					TopologySpreadConstraints: r.buildTopologySpreadConstraints(ac),
 					SchedulerName:             ac.Spec.SchedulerName,
 					PriorityClassName:             ac.Spec.PriorityClassName,
 					TerminationGracePeriodSeconds: ptrInt64(120),
@@ -402,7 +402,6 @@ func (r *AutoCacheReconciler) buildAffinity(ac *cachev1alpha1.AutoCache) *corev1
 		return ac.Spec.Affinity
 	}
 
-	// Default: Pod anti-affinity to spread across nodes
 	return &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
 			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
@@ -415,6 +414,32 @@ func (r *AutoCacheReconciler) buildAffinity(ac *cachev1alpha1.AutoCache) *corev1
 						TopologyKey: "kubernetes.io/hostname",
 					},
 				},
+				{
+					Weight: 50,
+					PodAffinityTerm: corev1.PodAffinityTerm{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: ac.GetSelectorLabels(),
+						},
+						TopologyKey: "topology.kubernetes.io/zone",
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildTopologySpreadConstraints builds default topology spread constraints
+func (r *AutoCacheReconciler) buildTopologySpreadConstraints(ac *cachev1alpha1.AutoCache) []corev1.TopologySpreadConstraint {
+	if len(ac.Spec.TopologySpreadConstraints) > 0 {
+		return ac.Spec.TopologySpreadConstraints
+	}
+	return []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: ac.GetSelectorLabels(),
 			},
 		},
 	}

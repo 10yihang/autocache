@@ -13,6 +13,11 @@ import (
 	"github.com/10yihang/autocache/pkg/errors"
 )
 
+// scanPhaseFlag is the high bit used in the scan cursor to distinguish
+// between the ShardedCache scan phase (bit=0) and the Dict scan phase (bit=1).
+// This enables a true incremental two-phase scan without collecting all keys first.
+const scanPhaseFlag uint64 = 1 << 63
+
 type Store struct {
 	cache   *ShardedCache
 	objects *Dict
@@ -484,30 +489,115 @@ func (s *Store) Scan(_ context.Context, cursor uint64, pattern string, count int
 		count = 10
 	}
 
-	keys := s.cache.Keys(pattern)
-	for _, key := range s.objects.Keys(pattern) {
-		if !containsKey(keys, key) {
-			keys = append(keys, key)
-		}
+	if pattern == "*" {
+		pattern = ""
 	}
-	sort.Strings(keys)
 
-	start := int(cursor)
-	if start >= len(keys) {
-		return []string{}, 0, nil
+	// Phase flag: bit 63 == 0 → scanning ShardedCache; bit 63 == 1 → scanning Dict
+	inDictPhase := (cursor & scanPhaseFlag) != 0
+	innerCursor := cursor & ^scanPhaseFlag
+
+	if !inDictPhase {
+		// Phase 1: scan ShardedCache (string keys)
+		keys, nextInner, err := s.cache.Scan(innerCursor, pattern, count)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		if len(keys) >= count {
+			// Collected enough results from ShardedCache alone
+			if nextInner == 0 {
+				return keys, 0, nil
+			}
+			return keys, nextInner, nil
+		}
+
+		if nextInner != 0 {
+			// ShardedCache has more keys but we didn't collect enough matching pattern.
+			// Stay in cache phase; next call will continue where we left off.
+			return keys, nextInner, nil
+		}
+
+		// ShardedCache is exhausted. We have some keys (maybe 0).
+		// If we have some but less than count, enter Dict phase to fill the quota.
+		needed := count - len(keys)
+		dictKeys, nextDict, err := s.scanDictKeys(pattern, needed, 0)
+		if err != nil {
+			return nil, 0, err
+		}
+		keys = append(keys, dictKeys...)
+
+		nextCursor := uint64(0)
+		if nextDict != 0 {
+			nextCursor = nextDict | scanPhaseFlag
+		}
+		return keys, nextCursor, nil
 	}
-	end := start + count
-	if end > len(keys) {
-		end = len(keys)
+
+	// Phase 2: scan Dict (object keys — Hash, List, Set, ZSet)
+	needed := count
+	if len(pattern) == 0 {
+		pattern = "*"
+	}
+	dictKeys, nextInner, err := s.scanDictKeys(pattern, needed, innerCursor)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	nextCursor := uint64(0)
-	if end < len(keys) {
-		nextCursor = uint64(end)
+	if nextInner != 0 {
+		nextCursor = nextInner | scanPhaseFlag
+	}
+	return dictKeys, nextCursor, nil
+}
+
+// scanDictKeys performs an incremental shard-based scan over the Dict.
+// cursor encoding: high 32 bits = shard index, low 32 bits = position within shard.
+func (s *Store) scanDictKeys(pattern string, count int, cursor uint64) ([]string, uint64, error) {
+	if count <= 0 {
+		count = 10
 	}
 
-	result := make([]string, end-start)
-	copy(result, keys[start:end])
+	shardIdx := int(cursor >> 32)
+	posInShard := int(cursor & 0xFFFFFFFF)
+
+	result := make([]string, 0, count)
+	totalShards := len(s.objects.shards)
+
+	for shardIdx < totalShards && len(result) < count {
+		shard := s.objects.shards[shardIdx]
+		shard.mu.RLock()
+
+		// Collect all non-expired keys in this shard
+		keys := make([]string, 0, len(shard.items))
+		for key, entry := range shard.items {
+			if !entry.IsExpired() {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		shard.mu.RUnlock()
+
+		for i := posInShard; i < len(keys) && len(result) < count; i++ {
+			key := keys[i]
+			if pattern == "" || matchPattern(pattern, key) {
+				result = append(result, key)
+			}
+			posInShard = i + 1
+		}
+
+		if posInShard >= len(keys) {
+			shardIdx++
+			posInShard = 0
+		}
+	}
+
+	var nextCursor uint64
+	if shardIdx >= totalShards {
+		nextCursor = 0
+	} else {
+		nextCursor = (uint64(shardIdx) << 32) | uint64(posInShard)
+	}
 	return result, nextCursor, nil
 }
 

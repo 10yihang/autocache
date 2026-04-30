@@ -115,11 +115,14 @@ func (r *AutoCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Initialize status
 	if ac.Status.Phase == "" {
 		ac.Status.Phase = cachev1alpha1.ClusterPhasePending
+		syncSpecSupportCondition(ac)
 		if err := r.Status().Update(ctx, ac); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+
+	syncSpecSupportCondition(ac)
 
 	// Reconcile ConfigMap
 	if err := r.reconcileConfigMap(ctx, ac); err != nil {

@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -177,14 +178,14 @@ func (r *AutoCacheReconciler) buildStatefulSet(ac *cachev1alpha1.AutoCache) *app
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					InitContainers:            []corev1.Container{initContainer},
-					Containers:                []corev1.Container{container},
-					Volumes:                   volumes,
-					Affinity:                  r.buildAffinity(ac),
-					Tolerations:               ac.Spec.Tolerations,
-					NodeSelector:              ac.Spec.NodeSelector,
-					TopologySpreadConstraints: r.buildTopologySpreadConstraints(ac),
-					SchedulerName:             ac.Spec.SchedulerName,
+					InitContainers:                []corev1.Container{initContainer},
+					Containers:                    []corev1.Container{container},
+					Volumes:                       volumes,
+					Affinity:                      r.buildAffinity(ac),
+					Tolerations:                   ac.Spec.Tolerations,
+					NodeSelector:                  ac.Spec.NodeSelector,
+					TopologySpreadConstraints:     r.buildTopologySpreadConstraints(ac),
+					SchedulerName:                 ac.Spec.SchedulerName,
 					PriorityClassName:             ac.Spec.PriorityClassName,
 					TerminationGracePeriodSeconds: ptrInt64(120),
 				},
@@ -282,6 +283,21 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 		FailureThreshold:    3,
 	}
 
+	command := []string{
+		"/autocache",
+		"--config", "/etc/autocache/autocache.conf",
+		"--data-dir", "/data",
+		"--metrics-addr", ":9121",
+		"--cluster-enabled",
+		"--bind", "$(POD_IP)",
+	}
+	if tieredStorageEnabled(ac) {
+		command = append(command, "--tiered-enabled", "--badger-path", "/data/warm")
+		if supportedPersistenceEnabled(ac) {
+			command = append(command, "--persist-enabled")
+		}
+	}
+
 	return corev1.Container{
 		Name:            "autocache",
 		Image:           ac.Spec.Image,
@@ -292,14 +308,7 @@ func (r *AutoCacheReconciler) buildContainer(ac *cachev1alpha1.AutoCache) corev1
 		Resources:       ac.Spec.Resources,
 		LivenessProbe:   livenessProbe,
 		ReadinessProbe:  readinessProbe,
-		Command: []string{
-			"/autocache",
-			"--config", "/etc/autocache/autocache.conf",
-			"--data-dir", "/data",
-			"--metrics-addr", ":9121",
-			"--cluster-enabled",
-			"--bind", "$(POD_IP)",
-		},
+		Command:         command,
 		Lifecycle: &corev1.Lifecycle{
 			PreStop: &corev1.LifecycleHandler{
 				Exec: &corev1.ExecAction{
@@ -514,11 +523,65 @@ func (r *AutoCacheReconciler) updateStatus(ctx context.Context, ac *cachev1alpha
 	}
 
 	// Update timestamp
+	syncSpecSupportCondition(ac)
 	now := metav1.Now()
 	ac.Status.LastUpdateTime = &now
 	ac.Status.ObservedGeneration = ac.Generation
 
 	return r.Status().Update(ctx, ac)
+}
+
+func syncSpecSupportCondition(ac *cachev1alpha1.AutoCache) {
+	condition := metav1.Condition{
+		Type:    cachev1alpha1.ConditionTypeDegraded,
+		Status:  metav1.ConditionFalse,
+		Reason:  "SpecSupported",
+		Message: "All configured storage options are supported by the operator.",
+	}
+
+	if unsupportedPersistenceMode(ac) {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "UnsupportedPersistenceMode"
+		condition.Message = "Redis AOF/Both persistence requires server-side AOF support; the operator does not generate unsupported persistence arguments."
+	} else if unsupportedColdTier(ac) {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "UnsupportedColdTier"
+		condition.Message = "S3 cold tier remains experimental and is not wired by the operator."
+	} else if unsupportedAuth(ac) {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "UnsupportedAuth"
+		condition.Message = "Redis AUTH/requirepass requires server and protocol support; the operator does not inject Secrets or generate unsupported authentication configuration."
+	}
+
+	meta.SetStatusCondition(&ac.Status.Conditions, condition)
+}
+
+func tieredStorageEnabled(ac *cachev1alpha1.AutoCache) bool {
+	return ac.Spec.TieredStorage != nil && ac.Spec.TieredStorage.Enabled
+}
+
+func supportedPersistenceEnabled(ac *cachev1alpha1.AutoCache) bool {
+	if ac.Spec.Storage == nil || !ac.Spec.Storage.Enabled || !tieredStorageEnabled(ac) {
+		return false
+	}
+	return ac.Spec.Storage.PersistenceMode == "" || ac.Spec.Storage.PersistenceMode == "RDB"
+}
+
+func unsupportedPersistenceMode(ac *cachev1alpha1.AutoCache) bool {
+	if ac.Spec.Storage == nil || !ac.Spec.Storage.Enabled {
+		return false
+	}
+	return ac.Spec.Storage.PersistenceMode == "AOF" || ac.Spec.Storage.PersistenceMode == "Both"
+}
+
+func unsupportedColdTier(ac *cachev1alpha1.AutoCache) bool {
+	return ac.Spec.TieredStorage != nil &&
+		ac.Spec.TieredStorage.ColdTier != nil &&
+		ac.Spec.TieredStorage.ColdTier.Type == "S3"
+}
+
+func unsupportedAuth(ac *cachev1alpha1.AutoCache) bool {
+	return ac.Spec.Auth != nil && ac.Spec.Auth.Enabled
 }
 
 // isPodReady checks if a pod is ready

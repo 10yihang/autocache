@@ -63,7 +63,10 @@ func NewStore(cfg *Config) *Store {
 	}
 
 	s := &Store{
-		cache:       NewShardedCache(ShardedCacheConfig{ShardCount: cfg.ShardCount}),
+		cache: NewShardedCache(ShardedCacheConfig{
+			ShardCount: cfg.ShardCount,
+			SkipLFU:    cfg.MaxMemory <= 0 || cfg.EvictPolicy == "noeviction",
+		}),
 		objects:     NewDict(cfg.ShardCount),
 		maxMemory:   cfg.MaxMemory,
 		evictPolicy: cfg.EvictPolicy,

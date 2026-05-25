@@ -11,10 +11,10 @@ import (
 
 const (
 	// defaultShardedDictShards is the default number of shards
-	defaultShardedDictShards = 256
+	defaultShardedDictShards = 4096
 
-	// defaultRingSize is the default ring buffer size per shard (16MB)
-	defaultRingSize = 16 << 20
+	// defaultRingSize is the default ring buffer size per shard (4MB)
+	defaultRingSize = 4 << 20
 
 	// defaultLFUWidth is the default TinyLFU counter width
 	defaultLFUWidth = 1 << 16
@@ -43,6 +43,7 @@ type ShardedCache struct {
 	shardCount uint64
 	seed       maphash.Seed
 	sampleSize int
+	skipLFU    bool
 
 	// Slot index: slot number → set of keys in that slot.
 	// Protected by slotMu. Updated on Set/Delete.
@@ -60,6 +61,14 @@ type ShardedCacheConfig struct {
 	RingSize     int
 	LFUWidth     int
 	SampledEvict int
+	SkipLFU      bool
+}
+
+func (sc *ShardedCache) recordAccess(shard *ZeroGCShard, hash uint64) {
+	if sc.skipLFU {
+		return
+	}
+	sc.recordAccess(shard, hash)
 }
 
 // DefaultShardedCacheConfig returns sensible defaults.
@@ -92,6 +101,7 @@ func NewShardedCache(cfg ShardedCacheConfig) *ShardedCache {
 		shardCount: uint64(cfg.ShardCount),
 		seed:       maphash.MakeSeed(),
 		sampleSize: cfg.SampledEvict,
+		skipLFU:    cfg.SkipLFU,
 		slotIndex:  make(map[uint16]map[string]struct{}),
 	}
 
@@ -136,7 +146,7 @@ func (sc *ShardedCache) Get(key string) ([]byte, bool) {
 
 	// Handle inline integers (no ring buffer)
 	if isInlineInt(raw) {
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		// Format integer to string inline
 		val := strconv.FormatInt(decodeInlineInt(raw), 10)
 		return StringToBytes(val), true
@@ -159,7 +169,7 @@ func (sc *ShardedCache) Get(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	return value, true
 }
@@ -179,7 +189,7 @@ func (sc *ShardedCache) GetCopy(key string) ([]byte, bool) {
 
 	// Handle inline integers
 	if isInlineInt(raw) {
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		val := strconv.FormatInt(decodeInlineInt(raw), 10)
 		return StringToBytes(val), true
 	}
@@ -201,7 +211,7 @@ func (sc *ShardedCache) GetCopy(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	return value, true
 }
@@ -235,7 +245,7 @@ func (sc *ShardedCache) Set(key string, value []byte, ttl time.Duration) error {
 	} else if oldOffset, ok := shard.index[hash]; ok {
 		// Try in-place update if key already exists (avoids eviction scan for overwrites)
 		if shard.ring.UpdateInPlace(int64(oldOffset), header, keyBytes, value) {
-			shard.lfu.RecordAccess(hash)
+			sc.recordAccess(shard, hash)
 			shard.mu.Unlock()
 			return nil
 		}
@@ -267,7 +277,7 @@ func (sc *ShardedCache) Set(key string, value []byte, ttl time.Duration) error {
 		sc.slotMu.Unlock()
 	}
 
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	return nil
 }
@@ -309,14 +319,14 @@ func (sc *ShardedCache) IncrBy(key string, delta int64) (int64, bool, error) {
 	if isInlineInt(raw) {
 		newVal := decodeInlineInt(raw) + delta
 		shard.index[hash] = encodeInlineInt(newVal)
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		return newVal, true, nil
 	}
 
 	// Fast path: new key — store as inline integer directly
 	if !exists {
 		shard.index[hash] = encodeInlineInt(delta)
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		if sc.slotFunc != nil {
 			slot := sc.slotFunc(key)
 			sc.slotMu.Lock()
@@ -335,12 +345,12 @@ func (sc *ShardedCache) IncrBy(key string, delta int64) (int64, bool, error) {
 	if err != nil || BytesToString(storedKey) != key {
 		// Stale/conflicting entry — treat as new inline integer
 		shard.index[hash] = encodeInlineInt(delta)
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		return delta, true, nil
 	}
 	if header.ExpireAt > 0 && time.Now().UnixNano() > header.ExpireAt {
 		shard.index[hash] = encodeInlineInt(delta)
-		shard.lfu.RecordAccess(hash)
+		sc.recordAccess(shard, hash)
 		return delta, true, nil
 	}
 
@@ -352,7 +362,7 @@ func (sc *ShardedCache) IncrBy(key string, delta int64) (int64, bool, error) {
 	newVal := currentVal + delta
 	// Transition: ring buffer entry → inline integer
 	shard.index[hash] = encodeInlineInt(newVal)
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	return newVal, true, nil
 }
@@ -401,7 +411,7 @@ func (sc *ShardedCache) SetNX(key string, value []byte, ttl time.Duration) (bool
 	}
 
 	shard.index[hash] = uint64(offset)
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	// Update slot index
 	if sc.slotFunc != nil {
@@ -494,7 +504,7 @@ func (sc *ShardedCache) SetXX(key string, value []byte, ttl time.Duration) (bool
 	}
 
 	shard.index[hash] = uint64(offset)
-	shard.lfu.RecordAccess(hash)
+	sc.recordAccess(shard, hash)
 
 	shard.mu.Unlock()
 	return true, nil

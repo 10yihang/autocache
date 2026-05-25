@@ -124,6 +124,35 @@ func NewRingBuffer(capacity int) *RingBuffer {
 	}
 }
 
+// UpdateInPlace overwrites an existing entry at the given offset.
+// Returns true if the new entry fits in the old entry's space, false otherwise.
+// Must be called while holding the shard write lock.
+func (rb *RingBuffer) UpdateInPlace(offset int64, header *EntryHeader, key, value []byte) bool {
+	newSize := int64(headerSize + len(key) + len(value))
+	if offset < 0 || offset+headerSize > rb.capacity {
+		return false
+	}
+
+	// Read old header to get old entry size
+	var oldHeader EntryHeader
+	oldHeader.UnmarshalFrom(rb.data[offset:])
+	oldSize := headerEntrySize(oldHeader)
+
+	if newSize > oldSize {
+		return false
+	}
+
+	// Write new header and data in-place
+	header.MarshalTo(rb.data[offset:])
+	keyStart := offset + headerSize
+	copy(rb.data[keyStart:], key)
+	valStart := keyStart + int64(len(key))
+	copy(rb.data[valStart:], value)
+
+	rb.writeCount.Add(1)
+	return true
+}
+
 // Write appends an entry to the buffer and returns its offset
 // Thread-safe: uses mutex for write serialization
 //

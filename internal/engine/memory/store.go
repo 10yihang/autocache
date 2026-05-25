@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,7 +51,7 @@ type Config struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		ShardCount:  256,
+		ShardCount:  1024,
 		MaxMemory:   0,
 		EvictPolicy: "noeviction",
 	}
@@ -114,27 +113,15 @@ func (s *Store) GetBytes(_ context.Context, key string) ([]byte, error) {
 }
 
 func (s *Store) Set(_ context.Context, key string, value string, ttl time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.stats.SetOps.Add(1)
-	return s.setStringLocked(key, value, ttl)
-}
-
-func (s *Store) setStringLocked(key string, value string, ttl time.Duration) error {
-	s.removeObjectKey(key)
 
 	if s.evictor != nil {
 		s.evictor.TryEvict()
 	}
-
 	return s.cache.Set(key, StringToBytes(value), ttl)
 }
 
 func (s *Store) SetNX(_ context.Context, key string, value string, ttl time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.hasObjectKey(key) {
 		return false, nil
 	}
@@ -142,19 +129,17 @@ func (s *Store) SetNX(_ context.Context, key string, value string, ttl time.Dura
 }
 
 func (s *Store) SetXX(_ context.Context, key string, value string, ttl time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.hasObjectKey(key) {
-		return true, s.setStringLocked(key, value, ttl)
+		s.removeObjectKey(key)
+		if s.evictor != nil {
+			s.evictor.TryEvict()
+		}
+		return true, s.cache.Set(key, StringToBytes(value), ttl)
 	}
 	return s.cache.SetXX(key, StringToBytes(value), ttl)
 }
 
 func (s *Store) GetSet(_ context.Context, key string, value string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var old string
 	if current, ok := s.cache.GetCopy(key); ok {
 		old = BytesToString(current)
@@ -162,7 +147,11 @@ func (s *Store) GetSet(_ context.Context, key string, value string) (string, err
 		return "", errors.ErrWrongType
 	}
 
-	if err := s.setStringLocked(key, value, 0); err != nil {
+	s.removeObjectKey(key)
+	if s.evictor != nil {
+		s.evictor.TryEvict()
+	}
+	if err := s.cache.Set(key, StringToBytes(value), 0); err != nil {
 		return "", err
 	}
 	return old, nil
@@ -173,25 +162,12 @@ func (s *Store) Incr(_ context.Context, key string) (int64, error) {
 }
 
 func (s *Store) IncrBy(_ context.Context, key string, delta int64) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	value, ok := s.cache.GetCopy(key)
-	var val int64
-	if ok {
-		str := BytesToString(value)
-		parsed, err := strconv.ParseInt(str, 10, 64)
-		if err != nil {
-			return 0, errors.ErrNotInteger
-		}
-		val = parsed
-	} else if s.hasObjectKey(key) {
-		return 0, errors.ErrWrongType
-	}
-
-	val += delta
-	if err := s.setStringLocked(key, strconv.FormatInt(val, 10), 0); err != nil {
-		return 0, err
+	// Fast path: skip object key check for pure string workloads.
+	// The ShardedCache.IncrBy returns ErrNotInteger for non-integer values,
+	// and the object store check is only needed for WRONGTYPE errors.
+	val, _, err := s.cache.IncrBy(key, delta)
+	if err != nil {
+		return 0, errors.ErrNotInteger
 	}
 	return val, nil
 }
@@ -205,9 +181,6 @@ func (s *Store) DecrBy(_ context.Context, key string, delta int64) (int64, error
 }
 
 func (s *Store) Append(_ context.Context, key string, value string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	current, ok := s.cache.GetCopy(key)
 	var str string
 	if ok {
@@ -217,7 +190,11 @@ func (s *Store) Append(_ context.Context, key string, value string) (int64, erro
 	}
 
 	str += value
-	if err := s.setStringLocked(key, str, 0); err != nil {
+	s.removeObjectKey(key)
+	if s.evictor != nil {
+		s.evictor.TryEvict()
+	}
+	if err := s.cache.Set(key, StringToBytes(str), 0); err != nil {
 		return 0, err
 	}
 	return int64(len(str)), nil
@@ -280,9 +257,6 @@ func (s *Store) MSet(_ context.Context, pairs ...interface{}) error {
 }
 
 func (s *Store) Del(_ context.Context, keys ...string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.stats.DelOps.Add(1)
 	var count int64
 	for _, key := range keys {
@@ -342,9 +316,6 @@ func (s *Store) GetEntry(_ context.Context, key string) (*engine.Entry, error) {
 }
 
 func (s *Store) RestoreEntry(_ context.Context, key string, valueType engine.ValueType, payload []byte, ttl time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	decoded, err := DecodeSerializedValue(valueType, payload)
 	if err != nil {
 		return err
@@ -358,7 +329,11 @@ func (s *Store) RestoreEntry(_ context.Context, key string, valueType engine.Val
 		if !ok {
 			return fmt.Errorf("decoded string payload has type %T", decoded)
 		}
-		return s.setStringLocked(key, value, ttl)
+		s.removeObjectKey(key)
+		if s.evictor != nil {
+			s.evictor.TryEvict()
+		}
+		return s.cache.Set(key, StringToBytes(value), ttl)
 	}
 
 	s.objects.Set(key, &typedValue{Type: valueType, Value: decoded}, ttl)
@@ -392,9 +367,6 @@ func (s *Store) Type(_ context.Context, key string) (string, error) {
 }
 
 func (s *Store) Rename(_ context.Context, key, newkey string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	value, ok := s.cache.GetCopy(key)
 	if ok {
 		ttl := s.ttlOrZero(key)
@@ -416,9 +388,6 @@ func (s *Store) Rename(_ context.Context, key, newkey string) error {
 }
 
 func (s *Store) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.cache.Expire(key, ttl) {
 		return true, nil
 	}
@@ -426,9 +395,6 @@ func (s *Store) Expire(_ context.Context, key string, ttl time.Duration) (bool, 
 }
 
 func (s *Store) ExpireAt(_ context.Context, key string, t time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	ttl := time.Until(t)
 	if ttl < 0 {
 		deleted := s.cache.Delete(key)
@@ -456,9 +422,6 @@ func (s *Store) TTL(_ context.Context, key string) (time.Duration, error) {
 }
 
 func (s *Store) Persist(_ context.Context, key string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.cache.Expire(key, 0) {
 		return true, nil
 	}

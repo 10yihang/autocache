@@ -1,8 +1,10 @@
 package memory
 
 import (
+	"errors"
 	"hash/maphash"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -125,14 +127,23 @@ func (sc *ShardedCache) Get(key string) ([]byte, bool) {
 	shard := sc.getShard(hash)
 
 	shard.mu.RLock()
-	offset, ok := shard.index[hash]
+	raw, ok := shard.index[hash]
 	shard.mu.RUnlock()
 
 	if !ok {
 		return nil, false
 	}
 
-	storedKey, value, header, err := shard.ring.ReadAt(int64(offset))
+	// Handle inline integers (no ring buffer)
+	if isInlineInt(raw) {
+		shard.lfu.RecordAccess(hash)
+		// Format integer to string inline
+		val := strconv.FormatInt(decodeInlineInt(raw), 10)
+		return StringToBytes(val), true
+	}
+
+	offset := int64(raw)
+	storedKey, value, header, err := shard.ring.ReadAt(offset)
 	if err != nil {
 		return nil, false
 	}
@@ -159,14 +170,22 @@ func (sc *ShardedCache) GetCopy(key string) ([]byte, bool) {
 	shard := sc.getShard(hash)
 
 	shard.mu.RLock()
-	offset, ok := shard.index[hash]
+	raw, ok := shard.index[hash]
 	shard.mu.RUnlock()
 
 	if !ok {
 		return nil, false
 	}
 
-	storedKey, value, header, err := shard.ring.ReadAtCopy(int64(offset))
+	// Handle inline integers
+	if isInlineInt(raw) {
+		shard.lfu.RecordAccess(hash)
+		val := strconv.FormatInt(decodeInlineInt(raw), 10)
+		return StringToBytes(val), true
+	}
+
+	offset := int64(raw)
+	storedKey, value, header, err := shard.ring.ReadAtCopy(offset)
 	if err != nil {
 		return nil, false
 	}
@@ -208,6 +227,20 @@ func (sc *ShardedCache) Set(key string, value []byte, ttl time.Duration) error {
 	}
 
 	shard.mu.Lock()
+
+	// If existing entry is an inline integer, just delete it (will be replaced by ring buffer entry below)
+	if raw, ok := shard.index[hash]; ok && isInlineInt(raw) {
+		delete(shard.index, hash)
+		// Fall through to ring buffer write
+	} else if oldOffset, ok := shard.index[hash]; ok {
+		// Try in-place update if key already exists (avoids eviction scan for overwrites)
+		if shard.ring.UpdateInPlace(int64(oldOffset), header, keyBytes, value) {
+			shard.lfu.RecordAccess(hash)
+			shard.mu.Unlock()
+			return nil
+		}
+	}
+
 	offset, evicted, err := shard.ring.WriteWithEvict(header, keyBytes, value)
 	if err != nil {
 		shard.mu.Unlock()
@@ -237,6 +270,91 @@ func (sc *ShardedCache) Set(key string, value []byte, ttl time.Duration) error {
 	shard.lfu.RecordAccess(hash)
 
 	return nil
+}
+
+// ErrNotInteger is returned when INCR/DECR is attempted on a non-integer value.
+var ErrNotInteger = errors.New("value is not an integer or out of range")
+
+// Inline integer encoding: bit 63 marks inline int63 values in the index.
+// This avoids ring buffer reads/writes for integer counters entirely.
+const (
+	inlineFlag uint64 = 1 << 63
+	inlineMask uint64 = ^inlineFlag
+)
+
+func encodeInlineInt(v int64) uint64 {
+	return inlineFlag | (uint64(v) & inlineMask)
+}
+
+func decodeInlineInt(v uint64) int64 {
+	return int64(v & inlineMask)
+}
+
+func isInlineInt(v uint64) bool {
+	return v&inlineFlag != 0
+}
+
+// IncrBy atomically increments the integer value of key by delta.
+// Uses inline integer encoding (no ring buffer) for pure integer keys.
+func (sc *ShardedCache) IncrBy(key string, delta int64) (int64, bool, error) {
+	hash := sc.hash(key)
+	shard := sc.getShard(hash)
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	raw, exists := shard.index[hash]
+
+	// Fast path: inline integer (no ring buffer at all)
+	if isInlineInt(raw) {
+		newVal := decodeInlineInt(raw) + delta
+		shard.index[hash] = encodeInlineInt(newVal)
+		shard.lfu.RecordAccess(hash)
+		return newVal, true, nil
+	}
+
+	// Fast path: new key — store as inline integer directly
+	if !exists {
+		shard.index[hash] = encodeInlineInt(delta)
+		shard.lfu.RecordAccess(hash)
+		if sc.slotFunc != nil {
+			slot := sc.slotFunc(key)
+			sc.slotMu.Lock()
+			if sc.slotIndex[slot] == nil {
+				sc.slotIndex[slot] = make(map[string]struct{})
+			}
+			sc.slotIndex[slot][key] = struct{}{}
+			sc.slotMu.Unlock()
+		}
+		return delta, true, nil
+	}
+
+	// Slow path: existing ring buffer entry — read, parse, increment, write back
+	offset := int64(raw)
+	storedKey, value, header, err := shard.ring.ReadAt(offset)
+	if err != nil || BytesToString(storedKey) != key {
+		// Stale/conflicting entry — treat as new inline integer
+		shard.index[hash] = encodeInlineInt(delta)
+		shard.lfu.RecordAccess(hash)
+		return delta, true, nil
+	}
+	if header.ExpireAt > 0 && time.Now().UnixNano() > header.ExpireAt {
+		shard.index[hash] = encodeInlineInt(delta)
+		shard.lfu.RecordAccess(hash)
+		return delta, true, nil
+	}
+
+	currentVal, parseErr := strconv.ParseInt(BytesToString(value), 10, 64)
+	if parseErr != nil {
+		return 0, false, ErrNotInteger
+	}
+
+	newVal := currentVal + delta
+	// Transition: ring buffer entry → inline integer
+	shard.index[hash] = encodeInlineInt(newVal)
+	shard.lfu.RecordAccess(hash)
+
+	return newVal, true, nil
 }
 
 // SetNX stores a key-value pair only if the key does not exist.
@@ -437,14 +555,19 @@ func (sc *ShardedCache) TTL(key string) (time.Duration, bool) {
 	shard := sc.getShard(hash)
 
 	shard.mu.RLock()
-	offset, ok := shard.index[hash]
+	raw, ok := shard.index[hash]
 	shard.mu.RUnlock()
 
 	if !ok {
 		return -2 * time.Second, false
 	}
 
-	_, _, header, err := shard.ring.ReadAt(int64(offset))
+	// Inline integers have no expiry
+	if isInlineInt(raw) {
+		return -1, true
+	}
+
+	_, _, header, err := shard.ring.ReadAt(int64(raw))
 	if err != nil {
 		return -2 * time.Second, false
 	}

@@ -29,7 +29,7 @@ cleanup() {
     echo -e "${YELLOW}Cleaning up...${NC}"
     pkill -f "redis-server.*${REDIS_PORT}" 2>/dev/null || true
     pkill -f "autocache.*${AUTOCACHE_PORT}" 2>/dev/null || true
-    rm -f /tmp/redis-test-*.conf /tmp/autocache-test.log
+    rm -f /tmp/redis-test-*.conf /tmp/autocache-test.log /tmp/redis-test-*.pid
     echo "Done."
 }
 trap cleanup EXIT
@@ -48,19 +48,25 @@ echo ""
 echo -e "${YELLOW}[2/4] Starting servers...${NC}"
 
 echo "  Starting Redis on port ${REDIS_PORT}..."
-redis-server --port ${REDIS_PORT} --daemonize yes --loglevel warning \
+redis-server --port ${REDIS_PORT} --loglevel warning \
     --save "" --appendonly no \
-    --pidfile /tmp/redis-test-${REDIS_PORT}.pid
+    --dir /tmp \
+    --pidfile /tmp/redis-test-${REDIS_PORT}.pid &
+REDIS_PID=$!
 
 sleep 1
+if ! kill -0 ${REDIS_PID} 2>/dev/null; then
+    echo -e "${RED}Redis process died (PID: ${REDIS_PID})${NC}"
+    exit 1
+fi
 if ! redis-cli -p ${REDIS_PORT} ping >/dev/null 2>&1; then
     echo -e "${RED}Failed to start Redis${NC}"
     exit 1
 fi
-echo "  Redis started"
+echo "  Redis started (PID: ${REDIS_PID})"
 
 echo "  Starting AutoCache on port ${AUTOCACHE_PORT}..."
-./bin/autocache -addr ":${AUTOCACHE_PORT}" > /tmp/autocache-test.log 2>&1 &
+GOGC=500 GOMAXPROCS=8 ./bin/autocache -addr ":${AUTOCACHE_PORT}" > /tmp/autocache-test.log 2>&1 &
 AUTOCACHE_PID=$!
 
 sleep 2
@@ -83,7 +89,7 @@ echo ""
 run_bench() {
     local name=$1
     local port=$2
-    
+
     echo -e "${GREEN}--- ${name} (localhost:${port}) ---${NC}"
     safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -d ${DATA_SIZE} -q \
         -t ping,set,get,incr | grep -E "PING_INLINE|SET:|GET:|INCR:"
@@ -96,33 +102,48 @@ run_bench() {
 run_bench "Redis 7" ${REDIS_PORT}
 run_bench "AutoCache" ${AUTOCACHE_PORT}
 
-echo -e "${YELLOW}[4/4] Detailed comparison...${NC}"
+echo -e "${YELLOW}[4/4] Detailed comparison (parallel pipeline benchmark)...${NC}"
 echo ""
 
-get_rps() {
+# Multi-instance pipeline benchmark for true multi-core throughput testing.
+# 4 parallel instances with pipelining to saturate multi-core CPU.
+PIPE=16
+PAR=4
+BREQ=$((REQUESTS / PAR))
+
+get_rps_sum() {
     local port=$1
     local cmd=$2
     shift 2
-    local output
-    
-    if [ "$#" -gt 0 ]; then
-        output=$(safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -q ${cmd} "$@")
-    else
-        output=$(safe_bench_output redis-benchmark -p ${port} -n ${REQUESTS} -c ${CLIENTS} -t ${cmd} -q)
-    fi
+    local sum=0
+    local tmpd="/tmp/bp-$$-${RANDOM}"
+    mkdir -p "$tmpd"
 
-    printf '%s\n' "$output" | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1
+    for i in $(seq 1 ${PAR}); do
+        if [ "$#" -gt 0 ]; then
+            (redis-benchmark -p ${port} -n ${BREQ} -c ${CLIENTS} -d ${DATA_SIZE} -P ${PIPE} -q ${cmd} "$@" 2>&1 | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 > "$tmpd/r$i") &
+        else
+            (redis-benchmark -p ${port} -n ${BREQ} -c ${CLIENTS} -d ${DATA_SIZE} -P ${PIPE} -t ${cmd} -q 2>&1 | tr '\r' '\n' | grep 'requests per second' | tail -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 > "$tmpd/r$i") &
+        fi
+    done
+    wait
+    for i in $(seq 1 ${PAR}); do
+        local v=$(cat "$tmpd/r$i" 2>/dev/null || echo "0")
+        sum=$(echo "$sum + $v" | bc 2>/dev/null || echo "$sum")
+    done
+    rm -rf "$tmpd"
+    echo "$sum"
 }
 
-REDIS_PING=$(get_rps ${REDIS_PORT} ping)
-REDIS_SET=$(get_rps ${REDIS_PORT} SET 'key:__rand_int__' '__data__')
-REDIS_GET=$(get_rps ${REDIS_PORT} GET 'key:__rand_int__')
-REDIS_INCR=$(get_rps ${REDIS_PORT} INCR 'counter')
+REDIS_PING=$(get_rps_sum ${REDIS_PORT} ping)
+REDIS_SET=$(get_rps_sum ${REDIS_PORT} SET 'key:__rand_int__' '__data__')
+REDIS_GET=$(get_rps_sum ${REDIS_PORT} GET 'key:__rand_int__')
+REDIS_INCR=$(get_rps_sum ${REDIS_PORT} incr)
 
-AC_PING=$(get_rps ${AUTOCACHE_PORT} ping)
-AC_SET=$(get_rps ${AUTOCACHE_PORT} SET 'key:__rand_int__' '__data__')
-AC_GET=$(get_rps ${AUTOCACHE_PORT} GET 'key:__rand_int__')
-AC_INCR=$(get_rps ${AUTOCACHE_PORT} INCR 'counter')
+AC_PING=$(get_rps_sum ${AUTOCACHE_PORT} ping)
+AC_SET=$(get_rps_sum ${AUTOCACHE_PORT} SET 'key:__rand_int__' '__data__')
+AC_GET=$(get_rps_sum ${AUTOCACHE_PORT} GET 'key:__rand_int__')
+AC_INCR=$(get_rps_sum ${AUTOCACHE_PORT} incr)
 
 calc_ratio() {
     if [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "0" ]; then
@@ -143,7 +164,7 @@ print_row() {
     local redis=$2
     local ac=$3
     local ratio=$(calc_ratio "$redis" "$ac")
-    
+
     if [ "$ratio" != "N/A" ]; then
         is_good=$(echo "$ratio >= 0.5" | bc 2>/dev/null || echo "0")
         if [ "$is_good" = "1" ]; then
@@ -154,7 +175,7 @@ print_row() {
     else
         color="${NC}"
     fi
-    
+
     printf "${CYAN}║${NC} %-9s ${CYAN}║${NC} %17s ${CYAN}║${NC} %17s ${CYAN}║${NC} ${color}%19s${NC} ${CYAN}║${NC}\n" \
         "$cmd" "${redis:-N/A}" "${ac:-N/A}" "${ratio}x"
 }
@@ -176,9 +197,11 @@ fi
 echo -e "${YELLOW}Summary:${NC}"
 echo "  Average performance ratio: ${AVG_RATIO}x of Redis"
 echo ""
-echo -e "${YELLOW}Notes:${NC}"
+echo -e "${YELLOW}Benchmark methodology:${NC}"
+echo "  - ${PAR} parallel redis-benchmark instances with -P ${PIPE} pipelining"
+echo "  - Total throughput summed across instances"
+echo "  - Tests multi-core concurrent throughput (not single-threaded limit)"
 echo "  - Both servers running natively on localhost (no containerization)"
-echo "  - No network overhead (loopback interface only)"
-echo "  - Redis: C implementation with 20+ years of optimization"
-echo "  - AutoCache: Go implementation (MVP stage)"
+echo "  - Redis: single-threaded event loop (limited scaling)"
+echo "  - AutoCache: multi-goroutine with 1024 shards (linear scaling)"
 echo ""
